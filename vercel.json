@@ -1,21 +1,11 @@
 {
   "rewrites": [
     {
-      "source": "/data/closures.json",
-      "destination": "https://bamboo-sku-intelligence.vercel.app/data/closures.json"
-    },
-    {
       "source": "/api/reports",
       "destination": "https://api-intelligence.getbamboo.com/api/reports"
     }
   ],
   "headers": [
-    {
-      "source": "/data/(.*)",
-      "headers": [
-        { "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }
-      ]
-    },
     {
       "source": "/(.*\\.jsx)",
       "headers": [
