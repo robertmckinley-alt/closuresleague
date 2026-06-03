@@ -2,7 +2,7 @@ name: Sync closures.json from Bamboo SKU Intelligence
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: '*/5 * * * *'   # every 5 minutes (GitHub Actions minimum)
   workflow_dispatch:
   push:
     branches: [main]
@@ -11,6 +11,10 @@ on:
 
 permissions:
   contents: write
+
+concurrency:
+  group: sync-closures
+  cancel-in-progress: false
 
 jobs:
   sync:
