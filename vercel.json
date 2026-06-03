@@ -1,11 +1,21 @@
 {
   "rewrites": [
     {
+      "source": "/data/closures.json",
+      "destination": "https://bamboo-sku-intelligence.vercel.app/data/closures.json"
+    },
+    {
       "source": "/api/reports",
       "destination": "https://api-intelligence.getbamboo.com/api/reports"
     }
   ],
   "headers": [
+    {
+      "source": "/data/(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=30, s-maxage=30" }
+      ]
+    },
     {
       "source": "/(.*\\.jsx)",
       "headers": [
@@ -17,12 +27,6 @@
       "source": "/",
       "headers": [
         { "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }
-      ]
-    },
-    {
-      "source": "/api/reports",
-      "headers": [
-        { "key": "Cache-Control", "value": "public, max-age=30, s-maxage=30" }
       ]
     }
   ]
