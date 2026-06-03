@@ -1,0 +1,56 @@
+name: Sync closures.json from Bamboo SKU Intelligence
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/sync-closures.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch upstream closures.json
+        run: |
+          mkdir -p data
+          for URL in \
+            "https://raw.githubusercontent.com/robertmckinley-alt/bamboo-sku-intelligence/main/data/closures.json" \
+            "https://bamboo-sku-intelligence.vercel.app/data/closures.json"
+          do
+            echo "trying $URL"
+            if curl -sLf --compressed -m 30 -o data/closures.json.new "$URL"; then
+              if python3 -c "import json; json.load(open('data/closures.json.new'))" 2>/dev/null; then
+                mv data/closures.json.new data/closures.json
+                echo "✓ fetched from $URL"
+                break
+              fi
+            fi
+            rm -f data/closures.json.new
+          done
+          if [ ! -f data/closures.json ]; then
+            echo "::error::no upstream source returned valid JSON"
+            exit 1
+          fi
+          ls -la data/closures.json
+
+      - name: Commit if changed
+        run: |
+          git config user.name  "closures-sync-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add data/closures.json
+          if git diff --cached --quiet; then
+            echo "no changes"
+          else
+            COUNT=$(python3 -c "import json; d=json.load(open('data/closures.json')); rows=d.get('rows') if isinstance(d, dict) else d; print(len(rows))")
+            git commit -m "sync: closures.json (${COUNT} rows) [skip ci]"
+            git push
+          fi
