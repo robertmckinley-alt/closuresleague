@@ -12,7 +12,7 @@
   const WEEKLY_TEAM_GOAL = 80000;
   // VMI reps per user spec: Josh, Koen, Curtis (matched as whole words).
   const VMI_REP_TOKENS = ['josh', 'koen', 'curtis'];
-  const POLL_MS = 15000;
+  const POLL_MS = 60000;
 
   // ---------- Number formatters ----------
   const _money0 = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });

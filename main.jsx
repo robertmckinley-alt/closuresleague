@@ -1,5 +1,5 @@
 /* ============================================================================
- * main.jsx — App shell · polling · event orchestration · brand toggles.
+ * main.jsx — App shell · polling · brand & type toggles · silent bookkeeping.
  * ============================================================================ */
 (function () {
   const { useState, useEffect, useMemo, useRef } = React;
@@ -19,7 +19,7 @@
     { id: 'team',  label: 'Team League' },
   ];
 
-  // Brand-hide pill (amber when active = hidden, slate when inactive = included)
+  // Brand-hide pill
   function BrandToggle({ on, setOn, label }) {
     return (
       <button
@@ -35,36 +35,35 @@
   }
 
   function App() {
-    // ----- persisted state -----
     const [tab, setTab]               = C.useUrlState('tab', 'exec');
     const [period, setPeriod]         = C.useUrlState('period', 'week');
     const [customRange, setCustomRange] = C.useUrlState('range', { from: '', to: '' });
     const [muted, setMutedState]      = useState(() => C.Audio.muted());
 
-    // ----- Brand toggles (hide entire brands from every total / leaderboard) -----
     const [hidePicc,      setHidePicc]      = C.useUrlState('hidePicc',      false);
     const [hideMicrobar,  setHideMicrobar]  = C.useUrlState('hideMicrobar',  false);
     const [hideSungaze,   setHideSungaze]   = C.useUrlState('hideSungaze',   false);
 
-    // ----- data state -----
+    // Closure-type toggle (matches parent's All / Group / Product)
+    //   group   = first time this (store × SKU group) sold
+    //   product = new product within an existing SKU group
+    const [closureType, setClosureType] = C.useUrlState('type', 'all');
+
     const [data, setData]   = useState({ closures: [], isDemo: false, source: null });
     const [fetchedAt, setFetchedAt] = useState(null);
     const [isLive, setIsLive]       = useState(false);
 
-    // ----- engine state (for animations) -----
     const priorRanksRef   = useRef(null);
     const priorBadgesRef  = useRef({ reps: new Map(), vmi: new Map() });
     const priorTeamPctRef = useRef(0);
     const emitterRef      = useRef(C.createEmitter());
 
-    // ----- transient UI state -----
     const [selectedPlayer, setSelectedPlayer] = useState(null);
     const [searchOpen, setSearchOpen]         = useState(false);
     const [flashFirstName, setFlashFirstName] = useState({ reps: null, vmi: null });
 
     function setMuted(v) { C.Audio.setMuted(v); setMutedState(v); }
 
-    // ----- Polling -----
     async function refresh() {
       try {
         const res = await Api.loadWithFallback();
@@ -76,42 +75,45 @@
     useEffect(() => { refresh(); }, []);
     C.usePolling(refresh, C.POLL_MS);
 
-    // ----- Brand filter — applied BEFORE engines see the data, so every
-    // total, leaderboard, KPI, team thermometer and activity feed reflects the toggles. -----
     const filteredClosures = useMemo(() => {
-      if (!hidePicc && !hideMicrobar && !hideSungaze) return data.closures;
+      const anyBrand = hidePicc || hideMicrobar || hideSungaze;
+      const typeFilter = (closureType === 'group' || closureType === 'product');
+      if (!anyBrand && !typeFilter) return data.closures;
       const PICC_RE     = /\bpicc\b/i;
       const MICROBAR_RE = /micro\s*bar/i;
       const SUNGAZE_RE  = /\bsungaze\b/i;
       return data.closures.filter(c => {
+        if (typeFilter && c.type && c.type !== closureType) return false;
         const n = c.skuName || '';
         if (hidePicc     && PICC_RE.test(n))     return false;
         if (hideMicrobar && MICROBAR_RE.test(n)) return false;
         if (hideSungaze  && SUNGAZE_RE.test(n))  return false;
         return true;
       });
-    }, [data.closures, hidePicc, hideMicrobar, hideSungaze]);
+    }, [data.closures, hidePicc, hideMicrobar, hideSungaze, closureType]);
 
-    // ----- Compute league state -----
-    const leagueState = useMemo(() => {
-      return E.buildLeagueState({
-        closures: filteredClosures,
-        period,
-        customRange,
-        asOf: new Date(),
-        priorRanks: priorRanksRef.current,
-      });
-    }, [filteredClosures, period, customRange, fetchedAt]);
+    const typeCounts = useMemo(() => {
+      let group = 0, product = 0;
+      for (const c of data.closures) {
+        if (c.type === 'product') product++;
+        else group++;
+      }
+      return { group, product, all: group + product };
+    }, [data.closures]);
+
+    const leagueState = useMemo(() => E.buildLeagueState({
+      closures: filteredClosures,
+      period, customRange,
+      asOf: new Date(),
+      priorRanks: priorRanksRef.current,
+    }), [filteredClosures, period, customRange, fetchedAt]);
 
     const weekHistory = useMemo(
       () => L.computeWeekHistory(filteredClosures, new Date(), 10),
       [filteredClosures]
     );
 
-    // ----- State bookkeeping (silent — no banners/confetti/sounds on clicks) -----
-    // We still track prior ranks / badges / team pct so the row-level flash
-    // animation works when a real leader change is detected from polling, but
-    // we do NOT emit any popups. The user explicitly asked for no popups.
+    // Silent bookkeeping — row flash only, no popups
     useEffect(() => {
       const prev = priorRanksRef.current;
       ['reps', 'vmi'].forEach(div => {
@@ -121,7 +123,6 @@
         let prevLeaderName = null;
         if (prevMap) for (const [name, rank] of prevMap.entries()) if (rank === 1) prevLeaderName = name;
         if (prevLeaderName && prevLeaderName !== top.name) {
-          // Quiet row highlight only — no banner, no confetti, no sound.
           setFlashFirstName(f => ({ ...f, [div]: top.name }));
           setTimeout(() => setFlashFirstName(f => ({ ...f, [div]: null })), 1800);
         }
@@ -133,7 +134,6 @@
       priorRanksRef.current = leagueState.newRankMaps;
     }, [leagueState]);
 
-    // ----- Keyboard shortcuts -----
     useEffect(() => {
       function onKey(e) {
         if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
@@ -161,15 +161,36 @@
           onSearch={() => setSearchOpen(true)}
         />
 
-        {/* Period strip + brand toggles */}
+        {/* Period + Type + Brand toggles */}
         <div className="px-4 py-2 bg-white border-b border-slate-200 flex items-center gap-3 flex-wrap no-print">
           <div className="text-[10px] font-mono text-slate-500 small-caps">period</div>
           <U.PeriodPicker period={period} setPeriod={setPeriod} customRange={customRange} setCustomRange={setCustomRange} />
+
+          <div className="h-5 w-px bg-slate-200 mx-1 hide-sm"></div>
+          <div className="text-[10px] font-mono text-slate-500 small-caps">type</div>
+          <div className="flex bg-slate-100 rounded-md p-0.5 text-[10px] font-semibold">
+            {[
+              ['all',     'All',     typeCounts.all],
+              ['group',   'Group',   typeCounts.group],
+              ['product', 'Product', typeCounts.product],
+            ].map(([k, l, n]) => (
+              <button
+                key={k}
+                onClick={() => setClosureType(k)}
+                className={`px-2 py-0.5 rounded ${closureType === k ? 'bg-slate-900 text-white shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
+                title={`${l}: ${n} closures`}
+              >
+                {l}<span className="font-mono opacity-60 ml-1">{n}</span>
+              </button>
+            ))}
+          </div>
+
           <div className="h-5 w-px bg-slate-200 mx-1 hide-sm"></div>
           <div className="text-[10px] font-mono text-slate-500 small-caps">hide</div>
           <BrandToggle on={hidePicc}     setOn={setHidePicc}     label="PICC" />
           <BrandToggle on={hideMicrobar} setOn={setHideMicrobar} label="Micro Bar" />
           <BrandToggle on={hideSungaze}  setOn={setHideSungaze}  label="Sungaze" />
+
           <span className="text-[10px] font-mono text-slate-500 small-caps ml-auto">
             {leagueState.periodLabel} · {filteredClosures.length} of {data.closures.length} closures since {C.MIN_CLOSURE_DATE}
             {data.isDemo && <span className="text-amber-700 ml-2">· DEMO DATA (api unreachable)</span>}
@@ -178,18 +199,10 @@
 
         <div className="flex-1 flex min-h-0 main-stack">
           <main className="flex-1 overflow-auto min-w-0">
-            {tab === 'exec' && (
-              <X.ExecutiveMode state={leagueState} weekHistory={weekHistory} onPickPlayer={setSelectedPlayer} />
-            )}
-            {tab === 'reps' && (
-              <L.RepsLeague state={leagueState} onPickPlayer={setSelectedPlayer} flashFirstName={flashFirstName.reps} />
-            )}
-            {tab === 'vmi' && (
-              <L.VmiLeague state={leagueState} onPickPlayer={setSelectedPlayer} flashFirstName={flashFirstName.vmi} />
-            )}
-            {tab === 'team' && (
-              <L.TeamLeague state={leagueState} weekHistory={weekHistory} />
-            )}
+            {tab === 'exec' && <X.ExecutiveMode state={leagueState} weekHistory={weekHistory} onPickPlayer={setSelectedPlayer} />}
+            {tab === 'reps' && <L.RepsLeague state={leagueState} onPickPlayer={setSelectedPlayer} flashFirstName={flashFirstName.reps} />}
+            {tab === 'vmi'  && <L.VmiLeague  state={leagueState} onPickPlayer={setSelectedPlayer} flashFirstName={flashFirstName.vmi} />}
+            {tab === 'team' && <L.TeamLeague state={leagueState} weekHistory={weekHistory} />}
           </main>
 
           <X.ActivityFeed
@@ -200,7 +213,6 @@
           />
         </div>
 
-        {/* Drawers */}
         {selectedPlayer && (
           <D.PlayerCardDrawer
             player={selectedPlayer}
