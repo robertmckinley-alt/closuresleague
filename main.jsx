@@ -108,7 +108,10 @@
       [filteredClosures]
     );
 
-    // ----- Event detection on each new state -----
+    // ----- State bookkeeping (silent — no banners/confetti/sounds on clicks) -----
+    // We still track prior ranks / badges / team pct so the row-level flash
+    // animation works when a real leader change is detected from polling, but
+    // we do NOT emit any popups. The user explicitly asked for no popups.
     useEffect(() => {
       const prev = priorRanksRef.current;
       ['reps', 'vmi'].forEach(div => {
@@ -118,12 +121,7 @@
         let prevLeaderName = null;
         if (prevMap) for (const [name, rank] of prevMap.entries()) if (rank === 1) prevLeaderName = name;
         if (prevLeaderName && prevLeaderName !== top.name) {
-          emitterRef.current.emit({
-            kind: 'newLeader',
-            title: `🔥 ${top.name.toUpperCase()} JUST TOOK FIRST PLACE`,
-            subtitle: `${div.toUpperCase()} League · ${C.fmt$(top.revenue)} this period`,
-            icon: '👑', palette: 'gold', confetti: true,
-          });
+          // Quiet row highlight only — no banner, no confetti, no sound.
           setFlashFirstName(f => ({ ...f, [div]: top.name }));
           setTimeout(() => setFlashFirstName(f => ({ ...f, [div]: null })), 1800);
         }
@@ -131,44 +129,7 @@
       const repsDiff = E.diffEarnedBadges(priorBadgesRef.current.reps, leagueState.reps, filteredClosures, 'reps', new Date());
       const vmiDiff  = E.diffEarnedBadges(priorBadgesRef.current.vmi,  leagueState.vmi,  filteredClosures, 'vmi',  new Date());
       priorBadgesRef.current = { reps: repsDiff.newMap, vmi: vmiDiff.newMap };
-      const wasInitial = !prev;
-      if (!wasInitial) {
-        [...repsDiff.events, ...vmiDiff.events].slice(0, 4).forEach(evt => {
-          emitterRef.current.emit({
-            kind: 'badge',
-            title: `🏅 ${evt.player} UNLOCKED “${evt.badge.title}”`,
-            subtitle: evt.badge.desc,
-            icon: evt.badge.emoji,
-            palette: evt.badge.tone === 'gold' ? 'gold' : evt.badge.tone === 'fire' ? 'fire' : evt.badge.tone === 'plat' ? 'plat' : 'emerald',
-            confetti: ['legend', 'closer_king', 'gold_jacket'].includes(evt.badge.id),
-          });
-        });
-      }
-      const prevTeamPct = priorTeamPctRef.current;
-      const curTeamPct  = leagueState.team.pct;
-      if (prevTeamPct < 1.0 && curTeamPct >= 1.0) {
-        emitterRef.current.emit({
-          kind: 'teamHit',
-          title: `🚀 TEAM HIT WEEKLY GOAL ${C.fmt$(leagueState.team.target)}`,
-          subtitle: `Total: ${C.fmt$(leagueState.team.total)}`,
-          icon: '🎉', palette: 'emerald', confetti: true,
-        });
-      } else if (prevTeamPct < 0.75 && curTeamPct >= 0.75) {
-        emitterRef.current.emit({
-          kind: 'goalHit',
-          title: `📈 TEAM CROSSED 75% OF WEEKLY GOAL`,
-          subtitle: `${C.fmt$(leagueState.team.total)} of ${C.fmt$(leagueState.team.target)}`,
-          icon: '📈', palette: 'emerald', confetti: false,
-        });
-      } else if (prevTeamPct < 0.5 && curTeamPct >= 0.5) {
-        emitterRef.current.emit({
-          kind: 'goalHit',
-          title: `🎯 TEAM CROSSED 50% OF WEEKLY GOAL`,
-          subtitle: `${C.fmt$(leagueState.team.total)} of ${C.fmt$(leagueState.team.target)}`,
-          icon: '🎯', palette: 'emerald', confetti: false,
-        });
-      }
-      priorTeamPctRef.current = curTeamPct;
+      priorTeamPctRef.current = leagueState.team.pct;
       priorRanksRef.current = leagueState.newRankMaps;
     }, [leagueState]);
 
