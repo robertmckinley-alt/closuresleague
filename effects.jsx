@@ -61,9 +61,9 @@
 
   // ---------- Toast / Achievement banner ----------
   function AchievementBanner({ event, onClose }) {
-    // event = { kind, title, subtitle, icon, palette }
+    // Auto-dismiss after 6s (gives time to read + tap X).
     useEffect(() => {
-      const t = setTimeout(onClose, 4200);
+      const t = setTimeout(onClose, 6000);
       return () => clearTimeout(t);
     }, [event, onClose]);
     const palette = event.palette || 'ink';
@@ -74,19 +74,29 @@
       : 'ink-grad';
     return (
       <div className="fixed top-3 left-1/2 -translate-x-1/2 z-[70] no-print" style={{ pointerEvents: 'none' }}>
-        <div className={`banner-in ${grad} text-white rounded-xl px-5 py-3 flex items-center gap-3 shadow-2xl`}
-             style={{ minWidth: 360, maxWidth: '92vw', boxShadow: '0 12px 36px rgba(15,23,42,.32), inset 0 1px 0 rgba(255,255,255,.18)' }}>
-          <div className="text-[26px] crown-glow">{event.icon || '🏆'}</div>
-          <div className="leading-tight">
+        <div className={`banner-in ${grad} text-white rounded-xl pl-5 pr-2 py-3 flex items-center gap-3 shadow-2xl`}
+             style={{
+               minWidth: 320, maxWidth: '92vw',
+               boxShadow: '0 12px 36px rgba(15,23,42,.32), inset 0 1px 0 rgba(255,255,255,.18)',
+               pointerEvents: 'auto',
+             }}>
+          <div className="text-[26px] crown-glow flex-shrink-0">{event.icon || '🏆'}</div>
+          <div className="leading-tight flex-1 min-w-0">
             <div className="font-display text-[15px] font-semibold tracking-tight">{event.title}</div>
             {event.subtitle && <div className="text-[11px] font-mono opacity-90 mt-0.5">{event.subtitle}</div>}
           </div>
+          <button
+            onClick={onClose}
+            aria-label="Dismiss notification"
+            className="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-white/85 hover:text-white hover:bg-white/15 transition text-[18px] leading-none focus:outline-none focus:ring-2 focus:ring-white/40"
+            style={{ marginLeft: 4 }}
+          >×</button>
         </div>
       </div>
     );
   }
 
-  // ---------- Effects host: consumes events from BclCore emitter ----------
+  // ---------- Effects host ----------
   function EffectsHost({ emitter }) {
     const [banners, setBanners] = useState([]);
     const [confetti, setConfetti] = useState([]);
@@ -95,7 +105,6 @@
         const id = Math.random().toString(36).slice(2);
         setBanners(b => [...b, { id, ...evt }]);
         if (evt.confetti) setConfetti(c => [...c, { id, palette: evt.palette === 'gold' ? ['#fbbf24','#eab308','#fff'] : null }]);
-        // sound
         try {
           if (evt.kind === 'newLeader') C.Audio.newLeader();
           else if (evt.kind === 'goalHit') C.Audio.goalHit();
@@ -110,8 +119,15 @@
     const dismissConfetti = (id) => setConfetti(c => c.filter(x => x.id !== id));
     return (
       <React.Fragment>
-        {banners.map(b => <AchievementBanner key={b.id} event={b} onClose={() => dismissBanner(b.id)} />)}
-        {confetti.map((c, i) => (
+        {/* Stack multiple banners vertically so newest sits on top */}
+        <div className="fixed top-0 left-0 right-0 flex flex-col items-center gap-2 pt-3 z-[70] no-print" style={{ pointerEvents: 'none' }}>
+          {banners.map(b => (
+            <div key={b.id} style={{ pointerEvents: 'auto' }}>
+              <AchievementBannerStacked event={b} onClose={() => dismissBanner(b.id)} />
+            </div>
+          ))}
+        </div>
+        {confetti.map((c) => (
           <React.Fragment key={c.id}>
             <ConfettiBurst id={c.id} palette={c.palette} />
             <DismissAfter ms={2400} onDone={() => dismissConfetti(c.id)} />
@@ -120,16 +136,50 @@
       </React.Fragment>
     );
   }
+
+  // Same look as AchievementBanner but rendered inside a flow container (no fixed positioning).
+  function AchievementBannerStacked({ event, onClose }) {
+    useEffect(() => {
+      const t = setTimeout(onClose, 6000);
+      return () => clearTimeout(t);
+    }, [event, onClose]);
+    const palette = event.palette || 'ink';
+    const grad = palette === 'gold' ? 'gold-grad'
+      : palette === 'fire' ? 'fire-grad'
+      : palette === 'plat' ? 'plat-grad'
+      : palette === 'emerald' ? 'emerald-grad'
+      : 'ink-grad';
+    return (
+      <div
+        className={`banner-in ${grad} text-white rounded-xl pl-5 pr-2 py-3 flex items-center gap-3 shadow-2xl`}
+        style={{
+          minWidth: 320, maxWidth: '92vw',
+          boxShadow: '0 12px 36px rgba(15,23,42,.32), inset 0 1px 0 rgba(255,255,255,.18)',
+        }}
+      >
+        <div className="text-[26px] crown-glow flex-shrink-0">{event.icon || '🏆'}</div>
+        <div className="leading-tight flex-1 min-w-0">
+          <div className="font-display text-[15px] font-semibold tracking-tight">{event.title}</div>
+          {event.subtitle && <div className="text-[11px] font-mono opacity-90 mt-0.5">{event.subtitle}</div>}
+        </div>
+        <button
+          onClick={onClose}
+          aria-label="Dismiss notification"
+          className="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-white/85 hover:text-white hover:bg-white/15 transition text-[18px] leading-none focus:outline-none focus:ring-2 focus:ring-white/40"
+          style={{ marginLeft: 4 }}
+        >×</button>
+      </div>
+    );
+  }
+
   function DismissAfter({ ms, onDone }) {
     useEffect(() => { const t = setTimeout(onDone, ms); return () => clearTimeout(t); }, []);
     return null;
   }
 
-  // ---------- Crown row badge (used in leaderboards) ----------
   function CrownBadge() {
     return <span className="crown-glow" style={{ fontSize: 14 }}>👑</span>;
   }
 
-  // ---------- Expose ----------
   window.BclEffects = { ConfettiBurst, AchievementBanner, EffectsHost, CrownBadge };
 })();
