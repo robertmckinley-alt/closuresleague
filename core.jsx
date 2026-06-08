@@ -12,7 +12,7 @@
   const MIN_CLOSURE_DATE = '2026-06-01';  // Ledger floor — 5/31 EOD is the baseline cutoff
   const WEEKLY_REP_GOAL = 15000;
   const WEEKLY_VMI_GOAL = 10000;
-  const WEEKLY_TEAM_GOAL = 80000;
+  const WEEKLY_TEAM_GOAL = 100000;
   // VMI reps per user spec: Josh, Koen, Curtis (matched as whole words).
   const VMI_REP_TOKENS = ['josh', 'koen', 'curtis'];
   const POLL_MS = 60000;
