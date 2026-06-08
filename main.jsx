@@ -77,7 +77,7 @@
 
     const filteredClosures = useMemo(() => {
       const anyBrand = hidePicc || hideMicrobar || hideSungaze;
-      const kindFilter = (closureType === 'top-sku' || closureType === 'cat-new' || closureType === 'cat-expansion');
+      const kindFilter = (closureType === 'top-sku' || closureType === 'cat-new');
       if (!anyBrand && !kindFilter) return data.closures;
       const PICC_RE     = /\bpicc\b/i;
       const MICROBAR_RE = /micro\s*bar/i;
@@ -93,11 +93,11 @@
     }, [data.closures, hidePicc, hideMicrobar, hideSungaze, closureType]);
 
     const typeCounts = useMemo(() => {
-      const out = {'top-sku':0, 'cat-new':0, 'cat-expansion':0};
+      const out = {'top-sku':0, 'cat-new':0};
       for (const c of data.closures) {
         if (out[c.closureKind] !== undefined) out[c.closureKind]++;
       }
-      out.all = out['top-sku'] + out['cat-new'] + out['cat-expansion'];
+      out.all = out['top-sku'] + out['cat-new'];
       return out;
     }, [data.closures]);
 
@@ -173,7 +173,6 @@
               ['all',           'All',          typeCounts.all],
               ['top-sku',       'Top SKU',      typeCounts['top-sku']],
               ['cat-new',       'New Category', typeCounts['cat-new']],
-              ['cat-expansion', 'Cat Expansion',typeCounts['cat-expansion']],
             ].map(([k, l, n]) => (
               <button
                 key={k}
