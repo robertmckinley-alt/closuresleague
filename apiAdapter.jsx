@@ -1,33 +1,38 @@
 /* ============================================================================
- * apiAdapter.jsx — Closures League · Final Definition (2026-06-08)
+ * apiAdapter.jsx — Data fetching for Closures League.
  *
- * The ONLY definition of a closure (no alternates exist in this app):
+ * Single source of truth for what counts as a closure (spec 2026-06-08):
  *
- *   A closure is a row in data/closures.json with ts >= 2026-06-01 where EITHER
- *     (a) the (clientName, skuName) pair did NOT appear in any row dated
- *         on or before 2026-05-31, OR
- *     (b) the (clientName, category) pair did NOT appear in any row dated
- *         on or before 2026-05-31.
+ *  Step 1 — Baseline (rows with ts <= 2026-05-31):
+ *    walk every row in closures.json with ts <= 2026-05-31 and build two
+ *    reference sets in memory —
+ *      SKU_BASELINE      = Set of (clientName, skuName)    pairs
+ *      CATEGORY_BASELINE = Set of (clientName, category)   pairs
+ *    Both sets are EXCLUSION lists. They are never shown to the user.
  *
- *   After validation we keep only the EARLIEST surviving row per
- *   (clientName, skuName) pair. The resulting array is the dataset every
- *   engine, leaderboard, KPI, chart and drawer consumes. There is no other
- *   source of closures; /api/reports is intentionally not touched here.
+ *  Step 2 — Closure validation (rows with ts >= 2026-06-01):
+ *    a row is a valid closure iff at least one of the following is TRUE:
+ *      (clientName, skuName)    NOT in SKU_BASELINE      -> closureKind='sku'
+ *      (clientName, category)   NOT in CATEGORY_BASELINE -> closureKind='category'
+ *    when BOTH are simultaneously new -> closureKind='both'.
+ *    every other row is dropped.
  *
- * Tagging — each surviving row is annotated with:
- *   closureKind: 'sku'  | 'both'
- *     'both' = first-ever placement of any SKU in this category at this store
- *     'sku'  = store already had something else in this category but this is
- *              the first time selling this specific SKU
- *   (No 'category' alone: every "new category" event is also a "new SKU".)
+ *  Step 3 — Dedup:
+ *    across the validated rows, keep the EARLIEST row per (clientName, skuName)
+ *    so the same closure can never be double-counted on multiple days.
+ *
+ * Output: a single closures[] array consumed by every engine, leaderboard,
+ * KPI, chart, and aggregation in the app. No /api/reports synthesis. No
+ * demo fallback — if the file fails to load we surface the error.
  * ============================================================================ */
 (function () {
   const C = window.BclCore;
   const CLOSURES_LOCAL  = './data/closures.json';
   const CLOSURES_DIRECT = 'https://bamboo-sku-intelligence.vercel.app/data/closures.json';
 
-  const BASELINE_CUTOFF = '2026-05-31';     // inclusive — baseline state at EOD 5/31 UTC
-  const CLOSURE_START   = '2026-06-01';     // inclusive — closures count from 6/1 forward
+  // ledger boundary
+  const BASELINE_LAST_DAY = '2026-05-31';   // last day of baseline window
+  const CLOSURE_FIRST_DAY = '2026-06-01';   // first day a closure can land
 
   function unpackClosures(data) {
     if (Array.isArray(data)) return data;
@@ -41,7 +46,7 @@
     return [];
   }
 
-  function normalizeClosure(r) {
+  function normalizeRow(r) {
     const ts = (typeof r.ts === 'string') ? r.ts.slice(0, 10) : C.ymd(r.ts);
     return {
       ts,
@@ -53,49 +58,73 @@
       units: Number(r.units || r.u || 0),
       sr: String(r.sr || r.salesRep || r.rep || 'Unassigned').trim(),
       vr: String(r.vr || r.vmiRep || 'Unassigned').trim(),
-      type: String(r.type || 'group').trim().toLowerCase(),
     };
   }
 
-  // Pure: takes a normalized row array, returns the deduped closure set.
-  // Exposed for unit testing.
-  function deriveClosures(allRows) {
-    const SKU_BASELINE = new Set();
-    const CATEGORY_BASELINE = new Set();
-    for (const c of allRows) {
-      if (c.ts <= BASELINE_CUTOFF) {
-        SKU_BASELINE.add(c.clientName + '||' + c.skuName);
-        CATEGORY_BASELINE.add(c.clientName + '||' + c.category);
-      }
+  function pairKey(a, b) { return a + '||' + b; }
+
+  /**
+   * The whole pipeline in one place.
+   *  - rows ts <= 5/31 -> seed SKU_BASELINE + CATEGORY_BASELINE
+   *  - rows ts >= 6/1  -> validate against the baselines, tag closureKind
+   *  - dedup -> keep earliest per (clientName, skuName)
+   */
+  function pipeline(rawRows) {
+    const SKU_BASELINE      = new Set();   // (clientName, skuName)
+    const CATEGORY_BASELINE = new Set();   // (clientName, category)
+
+    // Pass 1 — seed baselines from anything on or before 5/31. We don't care
+    // about rev/units; presence in closures.json with ts <= 5/31 means "this
+    // store already sold this SKU / category before the tracker started".
+    for (const r of rawRows) {
+      if (!r.ts || r.ts > BASELINE_LAST_DAY) continue;
+      if (!r.clientName || !r.skuName) continue;
+      SKU_BASELINE.add(pairKey(r.clientName, r.skuName));
+      CATEGORY_BASELINE.add(pairKey(r.clientName, r.category));
     }
 
-    const valid = [];
-    for (const c of allRows) {
-      if (c.ts < CLOSURE_START) continue;
-      const isNewSku = !SKU_BASELINE.has(c.clientName + '||' + c.skuName);
-      const isNewCat = !CATEGORY_BASELINE.has(c.clientName + '||' + c.category);
-      if (!isNewSku && !isNewCat) continue;
-      const closureKind = (isNewSku && isNewCat) ? 'both' : (isNewSku ? 'sku' : 'category');
-      valid.push(Object.assign({}, c, { closureKind }));
+    // Pass 2 — validate ts >= 6/1 rows against the baselines.
+    const validated = [];
+    for (const r of rawRows) {
+      if (!r.ts || r.ts < CLOSURE_FIRST_DAY) continue;
+      if (!r.clientName || !r.skuName) continue;
+      if (!(r.rev > 0)) continue;   // ignore zero-rev rows
+      const skuNew = !SKU_BASELINE.has(pairKey(r.clientName, r.skuName));
+      const catNew = !CATEGORY_BASELINE.has(pairKey(r.clientName, r.category));
+      if (!skuNew && !catNew) continue;   // already placed before — not a closure
+      let closureKind;
+      if (skuNew && catNew)      closureKind = 'both';
+      else if (catNew)           closureKind = 'category';
+      else                       closureKind = 'sku';
+      validated.push(Object.assign({}, r, { closureKind }));
     }
 
-    // Dedup: earliest row per (clientName, skuName)
-    const firstByPair = new Map();
-    for (const c of valid) {
-      const key = c.clientName + '||' + c.skuName;
-      const cur = firstByPair.get(key);
-      if (!cur || c.ts < cur.ts) firstByPair.set(key, c);
+    // Pass 3 — dedup: earliest row per (clientName, skuName) wins. We sort
+    // ascending so the FIRST occurrence is the one we keep.
+    validated.sort((a, b) => a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0);
+    const seen = new Set();
+    const dedup = [];
+    for (const r of validated) {
+      const k = pairKey(r.clientName, r.skuName);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      dedup.push(r);
     }
-    const closures = Array.from(firstByPair.values());
-    closures.sort((a, b) => a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0);
-    return { closures, SKU_BASELINE, CATEGORY_BASELINE, validCount: valid.length };
+
+    return {
+      closures: dedup,
+      baselineCounts: { sku: SKU_BASELINE.size, category: CATEGORY_BASELINE.size },
+      rawCount: rawRows.length,
+      validatedCount: validated.length,
+      dedupedCount: dedup.length,
+    };
   }
 
   async function fetchHistoricalClosures() {
     let lastErr = null;
     for (const url of [CLOSURES_LOCAL, CLOSURES_DIRECT]) {
       try {
-        const res = await fetch(url, { credentials: 'omit' });
+        const res = await fetch(url, { credentials: 'omit', cache: 'no-store' });
         if (!res.ok) { lastErr = new Error('HTTP ' + res.status + ' @ ' + url); continue; }
         const data = await res.json();
         return { data, source: url };
@@ -107,61 +136,39 @@
   async function loadWithFallback() {
     try {
       const fetched = await fetchHistoricalClosures();
-      const raw = unpackClosures(fetched.data);
-      const allRows = raw.map(normalizeClosure)
-        .filter(c => c.ts && c.rev > 0 && c.clientName && c.skuName);
-      const derived = deriveClosures(allRows);
-      return {
-        closures: derived.closures,
+      const raw = unpackClosures(fetched.data).map(normalizeRow);
+      const result = pipeline(raw);
+      return Object.assign({}, result, {
         source: fetched.source,
         sourceError: null,
-        rawCount: allRows.length,
-        validCount: derived.validCount,
-        dedupedCount: derived.closures.length,
-        skuBaselineSize: derived.SKU_BASELINE.size,
-        categoryBaselineSize: derived.CATEGORY_BASELINE.size,
+        generatedAt: null, range: null,
         fetchedAt: Date.now(),
         isDemo: false,
-        generatedAt: null, range: null,
-      };
+      });
     } catch (e) {
+      // No demo fallback — surface the error.
       return {
         closures: [],
+        baselineCounts: { sku: 0, category: 0 },
+        rawCount: 0, validatedCount: 0, dedupedCount: 0,
         source: 'error',
         sourceError: String(e),
-        rawCount: 0, validCount: 0, dedupedCount: 0,
-        skuBaselineSize: 0, categoryBaselineSize: 0,
+        generatedAt: null, range: null,
         fetchedAt: Date.now(),
         isDemo: false,
-        generatedAt: null, range: null,
       };
     }
-  }
-
-  // Helper used by every category-by view across the app. Iterates the deduped
-  // closures array directly — never the parent's pre-aggregated chips.
-  function aggregateByCategory(closures) {
-    const buckets = {};
-    for (const c of closures) {
-      const k = c.category || 'Other';
-      const b = buckets[k] || (buckets[k] = { category: k, rev: 0, units: 0, count: 0, newSkuCount: 0, newCatCount: 0 });
-      b.rev   += Number(c.rev) || 0;
-      b.units += Number(c.units) || 0;
-      b.count += 1;
-      if (c.closureKind === 'both') b.newCatCount += 1;
-      if (c.closureKind === 'sku' || c.closureKind === 'both') b.newSkuCount += 1;
-    }
-    return Object.values(buckets).sort((a, b) => b.rev - a.rev);
   }
 
   window.BclApi = {
     loadWithFallback,
     fetchHistoricalClosures,
     unpackClosures,
-    normalizeClosure,
-    deriveClosures,
-    aggregateByCategory,
-    BASELINE_CUTOFF, CLOSURE_START,
-    CLOSURES_LOCAL, CLOSURES_DIRECT,
+    normalizeRow,
+    pipeline,
+    BASELINE_LAST_DAY,
+    CLOSURE_FIRST_DAY,
+    CLOSURES_LOCAL,
+    CLOSURES_DIRECT,
   };
 })();

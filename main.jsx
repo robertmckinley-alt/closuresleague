@@ -77,13 +77,13 @@
 
     const filteredClosures = useMemo(() => {
       const anyBrand = hidePicc || hideMicrobar || hideSungaze;
-      const typeFilter = (closureType === 'group' || closureType === 'product');
-      if (!anyBrand && !typeFilter) return data.closures;
+      const kindFilter = (closureType === 'sku' || closureType === 'category' || closureType === 'both');
+      if (!anyBrand && !kindFilter) return data.closures;
       const PICC_RE     = /\bpicc\b/i;
       const MICROBAR_RE = /micro\s*bar/i;
       const SUNGAZE_RE  = /\bsungaze\b/i;
       return data.closures.filter(c => {
-        if (typeFilter && c.type && c.type !== closureType) return false;
+        if (kindFilter && c.closureKind !== closureType) return false;
         const n = c.skuName || '';
         if (hidePicc     && PICC_RE.test(n))     return false;
         if (hideMicrobar && MICROBAR_RE.test(n)) return false;
@@ -93,12 +93,13 @@
     }, [data.closures, hidePicc, hideMicrobar, hideSungaze, closureType]);
 
     const typeCounts = useMemo(() => {
-      let group = 0, product = 0;
+      let sku = 0, category = 0, both = 0;
       for (const c of data.closures) {
-        if (c.type === 'product') product++;
-        else group++;
+        if (c.closureKind === 'both') both++;
+        else if (c.closureKind === 'category') category++;
+        else if (c.closureKind === 'sku') sku++;
       }
-      return { group, product, all: group + product };
+      return { sku, category, both, all: sku + category + both };
     }, [data.closures]);
 
     const leagueState = useMemo(() => E.buildLeagueState({
@@ -170,9 +171,10 @@
           <div className="text-[10px] font-mono text-slate-500 small-caps">type</div>
           <div className="flex bg-slate-100 rounded-md p-0.5 text-[10px] font-semibold">
             {[
-              ['all',     'All',     typeCounts.all],
-              ['group',   'Group',   typeCounts.group],
-              ['product', 'Product', typeCounts.product],
+              ['all',      'All',          typeCounts.all],
+              ['sku',      'New SKU',      typeCounts.sku],
+              ['category', 'New Category', typeCounts.category],
+              ['both',     'Both',         typeCounts.both],
             ].map(([k, l, n]) => (
               <button
                 key={k}
@@ -192,8 +194,8 @@
           <BrandToggle on={hideSungaze}  setOn={setHideSungaze}  label="Sungaze" />
 
           <span className="text-[10px] font-mono text-slate-500 small-caps ml-auto">
-            {leagueState.periodLabel} · {filteredClosures.length} of {data.closures.length} closures since {C.MIN_CLOSURE_DATE}
-            {data.isDemo && <span className="text-amber-700 ml-2">· DEMO DATA (api unreachable)</span>}
+            {leagueState.periodLabel} · {filteredClosures.length} of {data.closures.length} closures ({data.closures.length} first-time placements since {C.MIN_CLOSURE_DATE})
+            {data.sourceError && <span className="text-rose-700 ml-2">· LOAD ERROR: {String(data.sourceError)}</span>}
           </span>
         </div>
 
