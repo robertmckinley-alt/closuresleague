@@ -1,23 +1,25 @@
 /* ============================================================================
  * apiAdapter.jsx — Data fetching for Closures League.
  *
- * HYBRID source (per user request 2026-06-08):
+ * HYBRID source:
  *   1. Historical baseline:  ./data/closures.json
  *      Mirrored from Bamboo SKU Intelligence by sync-closures.yml. Contains
- *      the parent's authoritative diff_closures.py output (one row per real
- *      day-over-day closure event).
+ *      the parent's diff_closures.py output (one row per day-over-day
+ *      closure event).
  *
  *   2. Fresh delta (today+):  https://api-intelligence.getbamboo.com/api/reports
  *      Same live endpoint SKU Intelligence reads. For every (client × product)
  *      pair whose last_ordered_at_utc is AFTER the last date in closures.json,
- *      we emit a synthetic closure on that date. This closes the upstream lag
- *      so today's activity shows up immediately.
+ *      we emit a synthetic closure on that date. This closes the upstream lag.
  *
  * Schema (post-normalize):
  *   { ts, clientName, skuName, skuGroup, category, rev, units, sr, vr, type }
  *   type ∈ { 'group', 'product', 'api' }   ('api' = synthesized from live API)
  *
- * Filter: ts >= MIN_CLOSURE_DATE (2026-05-13).
+ * Filter: ts >= MIN_CLOSURE_DATE (2026-05-28).
+ *   SKU data was added to /api/reports on 2026-05-27 21:15 UTC. Anything
+ *   ordered before that was already on the books; from 5/28 forward any new
+ *   (store × SKU) appearance is a genuine first-time placement.
  * ============================================================================ */
 (function () {
   const C = window.BclCore;
@@ -25,7 +27,6 @@
   const CLOSURES_DIRECT = 'https://bamboo-sku-intelligence.vercel.app/data/closures.json';
   const REPORTS_URL     = 'https://api-intelligence.getbamboo.com/api/reports';
 
-  // -------- closures.json unpack/normalize --------
   function unpackClosures(data) {
     if (Array.isArray(data)) return data;
     if (data && Array.isArray(data.rows) && Array.isArray(data.cols)) {
@@ -37,6 +38,7 @@
     if (data && Array.isArray(data.closures)) return data.closures;
     return [];
   }
+
   function normalizeClosure(r) {
     const ts = (typeof r.ts === 'string') ? r.ts.slice(0, 10) : C.ymd(r.ts);
     const type = String(r.type || 'group').trim().toLowerCase();
@@ -54,7 +56,6 @@
     };
   }
 
-  // -------- /api/reports normalize (dimension lookups + walk facts) --------
   function colIdx(dim, name) { return (dim && dim.columns) ? dim.columns.indexOf(name) : -1; }
   function nameLookup(dim) {
     if (!dim || !Array.isArray(dim.rows)) return [];
@@ -65,6 +66,7 @@
       return v != null ? String(v) : '';
     });
   }
+
   function deriveLiveClosures(apiData, sinceDate) {
     if (!apiData || !apiData.dimensions || !apiData.facts) return [];
     const dims = apiData.dimensions, facts = apiData.facts;
@@ -77,8 +79,10 @@
     const prdName  = colIdx(products, 'name');
     const prdCat   = colIdx(products, 'retail_category_idx');
 
-    const N_CLI = clients?.rows?.length || 0;
-    const clientName = new Array(N_CLI), clientSr = new Array(N_CLI), clientVr = new Array(N_CLI);
+    const N_CLI = (clients && clients.rows) ? clients.rows.length : 0;
+    const clientName = new Array(N_CLI);
+    const clientSr = new Array(N_CLI);
+    const clientVr = new Array(N_CLI);
     for (let i = 0; i < N_CLI; i++) {
       const r = clients.rows[i]; if (!r) continue;
       clientName[i] = (cliName >= 0 ? r[cliName] : r[1]) || '';
@@ -87,8 +91,9 @@
       clientSr[i] = (srI != null && reps[srI]) ? reps[srI] : 'Unassigned';
       clientVr[i] = (vrI != null && reps[vrI]) ? reps[vrI] : 'Unassigned';
     }
-    const N_PRD = products?.rows?.length || 0;
-    const productName = new Array(N_PRD), productCat = new Array(N_PRD);
+    const N_PRD = (products && products.rows) ? products.rows.length : 0;
+    const productName = new Array(N_PRD);
+    const productCat = new Array(N_PRD);
     for (let i = 0; i < N_PRD; i++) {
       const r = products.rows[i]; if (!r) continue;
       productName[i] = (prdName >= 0 ? r[prdName] : r[1]) || '';
@@ -108,7 +113,7 @@
         const cents = revs[i] || 0; if (cents <= 0) continue;
         const raw = ts[i]; if (!raw) continue;
         const day = String(raw).slice(0, 10);
-        if (day <= sinceDate) continue;            // already covered by closures.json
+        if (day <= sinceDate) continue;
         if (day < C.MIN_CLOSURE_DATE) continue;
         const cName = clientName[ci]; if (!cName) continue;
         out.push({
@@ -121,14 +126,13 @@
           units: units[i] || 0,
           sr: clientSr[ci],
           vr: clientVr[ci],
-          type: 'api',         // flag synthesized rows
+          type: 'api',
         });
       }
     }
     return out;
   }
 
-  // -------- fetchers --------
   async function fetchHistoricalClosures() {
     let lastErr = null;
     for (const url of [CLOSURES_LOCAL, CLOSURES_DIRECT]) {
@@ -141,6 +145,7 @@
     }
     throw lastErr || new Error('closures.json unreachable');
   }
+
   async function fetchLiveSnapshot() {
     try {
       const res = await fetch(REPORTS_URL, { credentials: 'omit', cache: 'no-store' });
@@ -149,16 +154,16 @@
     } catch (e) { return null; }
   }
 
-  // -------- master loader --------
   async function loadWithFallback() {
     let baseline = [], baselineSource = null, baselineLastDate = '0000-00-00';
     try {
-      const { data, source } = await fetchHistoricalClosures();
+      const fetched = await fetchHistoricalClosures();
+      const data = fetched.data;
       const raw = unpackClosures(data);
       baseline = raw.map(normalizeClosure).filter(c =>
         c.ts && c.ts >= C.MIN_CLOSURE_DATE && c.rev > 0 && c.clientName
       );
-      baselineSource = source;
+      baselineSource = fetched.source;
       baseline.forEach(c => { if (c.ts > baselineLastDate) baselineLastDate = c.ts; });
     } catch (e) {
       console.warn('baseline load failed:', e);
@@ -175,7 +180,6 @@
       console.warn('live API load failed:', e);
     }
 
-    // Merge — baseline (historical accurate) + fresh (today+)
     const closures = baseline.concat(fresh);
     closures.sort((a, b) => a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0);
 
@@ -188,18 +192,27 @@
       };
     }
     return {
-      closures, source: baselineSource ? baselineSource + (freshSource ? ' + live' : '') : freshSource,
+      closures,
+      source: baselineSource ? baselineSource + (freshSource ? ' + live' : '') : freshSource,
       sourceError: null,
-      baselineCount: baseline.length, freshCount: fresh.length, baselineLastDate,
+      baselineCount: baseline.length,
+      freshCount: fresh.length,
+      baselineLastDate,
       generatedAt: null, range: null,
-      fetchedAt: Date.now(), isDemo: false,
+      fetchedAt: Date.now(),
+      isDemo: false,
     };
   }
 
   window.BclApi = {
     loadWithFallback,
-    fetchHistoricalClosures, fetchLiveSnapshot,
-    deriveLiveClosures, unpackClosures, normalizeClosure,
-    CLOSURES_LOCAL, CLOSURES_DIRECT, REPORTS_URL,
+    fetchHistoricalClosures,
+    fetchLiveSnapshot,
+    deriveLiveClosures,
+    unpackClosures,
+    normalizeClosure,
+    CLOSURES_LOCAL,
+    CLOSURES_DIRECT,
+    REPORTS_URL,
   };
 })();

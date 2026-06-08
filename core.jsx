@@ -6,7 +6,10 @@
   const { useState, useEffect, useRef, useMemo, useCallback } = React;
 
   // ---------- Constants ----------
-  const MIN_CLOSURE_DATE = '2026-05-13';
+  // SKU data was added to the upstream API on 2026-05-27 21:15 UTC. Anything
+  // ordered before that was already on the books; from 5/28 forward any new
+  // (store × SKU) appearance is a genuine first-time placement = a real closure.
+  const MIN_CLOSURE_DATE = '2026-05-28';
   const WEEKLY_REP_GOAL = 15000;
   const WEEKLY_VMI_GOAL = 10000;
   const WEEKLY_TEAM_GOAL = 80000;
