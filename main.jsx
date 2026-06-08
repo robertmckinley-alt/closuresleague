@@ -77,7 +77,7 @@
 
     const filteredClosures = useMemo(() => {
       const anyBrand = hidePicc || hideMicrobar || hideSungaze;
-      const kindFilter = (closureType === 'sku' || closureType === 'category' || closureType === 'both');
+      const kindFilter = (closureType === 'top-sku' || closureType === 'cat-new' || closureType === 'cat-expansion');
       if (!anyBrand && !kindFilter) return data.closures;
       const PICC_RE     = /\bpicc\b/i;
       const MICROBAR_RE = /micro\s*bar/i;
@@ -93,13 +93,12 @@
     }, [data.closures, hidePicc, hideMicrobar, hideSungaze, closureType]);
 
     const typeCounts = useMemo(() => {
-      let sku = 0, category = 0, both = 0;
+      const out = {'top-sku':0, 'cat-new':0, 'cat-expansion':0};
       for (const c of data.closures) {
-        if (c.closureKind === 'both') both++;
-        else if (c.closureKind === 'category') category++;
-        else if (c.closureKind === 'sku') sku++;
+        if (out[c.closureKind] !== undefined) out[c.closureKind]++;
       }
-      return { sku, category, both, all: sku + category + both };
+      out.all = out['top-sku'] + out['cat-new'] + out['cat-expansion'];
+      return out;
     }, [data.closures]);
 
     const leagueState = useMemo(() => E.buildLeagueState({
@@ -171,10 +170,10 @@
           <div className="text-[10px] font-mono text-slate-500 small-caps">type</div>
           <div className="flex bg-slate-100 rounded-md p-0.5 text-[10px] font-semibold">
             {[
-              ['all',      'All',          typeCounts.all],
-              ['sku',      'New SKU',      typeCounts.sku],
-              ['category', 'New Category', typeCounts.category],
-              ['both',     'Both',         typeCounts.both],
+              ['all',           'All',          typeCounts.all],
+              ['top-sku',       'Top SKU',      typeCounts['top-sku']],
+              ['cat-new',       'New Category', typeCounts['cat-new']],
+              ['cat-expansion', 'Cat Expansion',typeCounts['cat-expansion']],
             ].map(([k, l, n]) => (
               <button
                 key={k}
@@ -194,7 +193,7 @@
           <BrandToggle on={hideSungaze}  setOn={setHideSungaze}  label="Sungaze" />
 
           <span className="text-[10px] font-mono text-slate-500 small-caps ml-auto">
-            {leagueState.periodLabel} · {filteredClosures.length} of {data.closures.length} closures ({data.closures.length} first-time placements since {C.MIN_CLOSURE_DATE})
+            {leagueState.periodLabel} · {filteredClosures.length} of {data.closures.length} closures (spec v2026-06-08-c; ledger starts {C.MIN_CLOSURE_DATE})
             {data.sourceError && <span className="text-rose-700 ml-2">· LOAD ERROR: {String(data.sourceError)}</span>}
           </span>
         </div>
