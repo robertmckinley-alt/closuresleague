@@ -1,31 +1,30 @@
 /* ============================================================================
  * apiAdapter.jsx — Data fetching for Closures League.
  *
- * HYBRID source:
- *   1. Historical baseline:  ./data/closures.json
- *      Mirrored from Bamboo SKU Intelligence by sync-closures.yml. Contains
- *      the parent's diff_closures.py output (one row per day-over-day
- *      closure event).
+ * Definition of a closure (per user, 2026-06-08):
+ *   The FIRST appearance of a (store × SKU) pair on or after 2026-05-28.
+ *   SKU data was added to the upstream API on 2026-05-27 21:15 UTC, so 5/28
+ *   is the earliest date at which "first time we've ever seen this pair"
+ *   becomes meaningful. Any later appearance of the same pair is a recurring
+ *   sale, NOT a new closure.
  *
- *   2. Fresh delta (today+):  https://api-intelligence.getbamboo.com/api/reports
- *      Same live endpoint SKU Intelligence reads. For every (client × product)
- *      pair whose last_ordered_at_utc is AFTER the last date in closures.json,
- *      we emit a synthetic closure on that date. This closes the upstream lag.
+ * Source:
+ *   ./data/closures.json (mirrored from Bamboo SKU Intelligence by
+ *   .github/workflows/sync-closures.yml). Each row tells us a (clientName,
+ *   skuName, ts) where the pair sold. We sort by date and keep only the
+ *   first row per pair.
  *
- * Schema (post-normalize):
+ *   We deliberately do NOT bolt /api/reports onto the dataset anymore —
+ *   that endpoint exposes cumulative revenue per pair, which over-attributes
+ *   to the last-touch date and distorts weekly buckets.
+ *
+ * Output schema:
  *   { ts, clientName, skuName, skuGroup, category, rev, units, sr, vr, type }
- *   type ∈ { 'group', 'product', 'api' }   ('api' = synthesized from live API)
- *
- * Filter: ts >= MIN_CLOSURE_DATE (2026-05-28).
- *   SKU data was added to /api/reports on 2026-05-27 21:15 UTC. Anything
- *   ordered before that was already on the books; from 5/28 forward any new
- *   (store × SKU) appearance is a genuine first-time placement.
  * ============================================================================ */
 (function () {
   const C = window.BclCore;
   const CLOSURES_LOCAL  = './data/closures.json';
   const CLOSURES_DIRECT = 'https://bamboo-sku-intelligence.vercel.app/data/closures.json';
-  const REPORTS_URL     = 'https://api-intelligence.getbamboo.com/api/reports';
 
   function unpackClosures(data) {
     if (Array.isArray(data)) return data;
@@ -56,81 +55,16 @@
     };
   }
 
-  function colIdx(dim, name) { return (dim && dim.columns) ? dim.columns.indexOf(name) : -1; }
-  function nameLookup(dim) {
-    if (!dim || !Array.isArray(dim.rows)) return [];
-    const i = colIdx(dim, 'name');
-    return dim.rows.map(r => {
-      if (!r) return '';
-      const v = i >= 0 ? r[i] : r[1];
-      return v != null ? String(v) : '';
-    });
-  }
-
-  function deriveLiveClosures(apiData, sinceDate) {
-    if (!apiData || !apiData.dimensions || !apiData.facts) return [];
-    const dims = apiData.dimensions, facts = apiData.facts;
-    const reps = nameLookup(dims.reps);
-    const retailCats = nameLookup(dims.retail_categories);
-    const clients = dims.clients, products = dims.products;
-    const cliName  = colIdx(clients, 'name');
-    const cliSr    = colIdx(clients, 'field_rep_idx');
-    const cliVr    = colIdx(clients, 'vmi_rep_idx');
-    const prdName  = colIdx(products, 'name');
-    const prdCat   = colIdx(products, 'retail_category_idx');
-
-    const N_CLI = (clients && clients.rows) ? clients.rows.length : 0;
-    const clientName = new Array(N_CLI);
-    const clientSr = new Array(N_CLI);
-    const clientVr = new Array(N_CLI);
-    for (let i = 0; i < N_CLI; i++) {
-      const r = clients.rows[i]; if (!r) continue;
-      clientName[i] = (cliName >= 0 ? r[cliName] : r[1]) || '';
-      const srI = cliSr >= 0 ? r[cliSr] : r[2];
-      const vrI = cliVr >= 0 ? r[cliVr] : r[3];
-      clientSr[i] = (srI != null && reps[srI]) ? reps[srI] : 'Unassigned';
-      clientVr[i] = (vrI != null && reps[vrI]) ? reps[vrI] : 'Unassigned';
+  // Reduce every row to ONE per (clientName, skuName), keeping the earliest ts.
+  // Each surviving row represents the actual first-ever closure of that pair.
+  function firstAppearanceDedupe(rows) {
+    const first = new Map();
+    for (const c of rows) {
+      const key = c.clientName + '||' + c.skuName;
+      const cur = first.get(key);
+      if (!cur || c.ts < cur.ts) first.set(key, c);
     }
-    const N_PRD = (products && products.rows) ? products.rows.length : 0;
-    const productName = new Array(N_PRD);
-    const productCat = new Array(N_PRD);
-    for (let i = 0; i < N_PRD; i++) {
-      const r = products.rows[i]; if (!r) continue;
-      productName[i] = (prdName >= 0 ? r[prdName] : r[1]) || '';
-      const ci = prdCat >= 0 ? r[prdCat] : r[3];
-      productCat[i] = (ci != null && retailCats[ci]) ? retailCats[ci] : 'Other';
-    }
-
-    const cps = facts.client_product_sales;
-    const out = [];
-    if (cps && Array.isArray(cps.row) && Array.isArray(cps.col)) {
-      const row = cps.row, col = cps.col;
-      const revs = cps.revenue_cents || [];
-      const units = cps.units || [];
-      const ts = cps.last_ordered_at_utc || [];
-      for (let i = 0; i < row.length; i++) {
-        const ci = row[i], pi = col[i];
-        const cents = revs[i] || 0; if (cents <= 0) continue;
-        const raw = ts[i]; if (!raw) continue;
-        const day = String(raw).slice(0, 10);
-        if (day <= sinceDate) continue;
-        if (day < C.MIN_CLOSURE_DATE) continue;
-        const cName = clientName[ci]; if (!cName) continue;
-        out.push({
-          ts: day,
-          clientName: cName,
-          skuName: productName[pi] || '',
-          skuGroup: productName[pi] || '',
-          category: productCat[pi] || 'Other',
-          rev: cents / 100,
-          units: units[i] || 0,
-          sr: clientSr[ci],
-          vr: clientVr[ci],
-          type: 'api',
-        });
-      }
-    }
-    return out;
+    return Array.from(first.values());
   }
 
   async function fetchHistoricalClosures() {
@@ -146,73 +80,45 @@
     throw lastErr || new Error('closures.json unreachable');
   }
 
-  async function fetchLiveSnapshot() {
-    try {
-      const res = await fetch(REPORTS_URL, { credentials: 'omit', cache: 'no-store' });
-      if (!res.ok) return null;
-      return await res.json();
-    } catch (e) { return null; }
-  }
-
   async function loadWithFallback() {
-    let baseline = [], baselineSource = null, baselineLastDate = '0000-00-00';
     try {
       const fetched = await fetchHistoricalClosures();
-      const data = fetched.data;
-      const raw = unpackClosures(data);
-      baseline = raw.map(normalizeClosure).filter(c =>
-        c.ts && c.ts >= C.MIN_CLOSURE_DATE && c.rev > 0 && c.clientName
-      );
-      baselineSource = fetched.source;
-      baseline.forEach(c => { if (c.ts > baselineLastDate) baselineLastDate = c.ts; });
-    } catch (e) {
-      console.warn('baseline load failed:', e);
-    }
-
-    let fresh = [], freshSource = null;
-    try {
-      const api = await fetchLiveSnapshot();
-      if (api) {
-        fresh = deriveLiveClosures(api, baselineLastDate);
-        freshSource = REPORTS_URL;
-      }
-    } catch (e) {
-      console.warn('live API load failed:', e);
-    }
-
-    const closures = baseline.concat(fresh);
-    closures.sort((a, b) => a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0);
-
-    if (closures.length === 0) {
+      const raw = unpackClosures(fetched.data);
+      const all = raw.map(normalizeClosure)
+        .filter(c => c.ts && c.ts >= C.MIN_CLOSURE_DATE && c.rev > 0 && c.clientName && c.skuName);
+      // Dedup to first-ever appearance per (clientName, skuName)
+      const closures = firstAppearanceDedupe(all);
+      closures.sort((a, b) => a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0);
       return {
-        closures: [], source: 'error',
-        sourceError: 'Neither closures.json nor /api/reports reachable',
-        baselineLastDate, freshCount: 0, baselineCount: 0,
-        fetchedAt: Date.now(), isDemo: false,
+        closures,
+        source: fetched.source,
+        sourceError: null,
+        rawCount: all.length,
+        dedupedCount: closures.length,
+        generatedAt: null, range: null,
+        fetchedAt: Date.now(),
+        isDemo: false,
+      };
+    } catch (e) {
+      return {
+        closures: [],
+        source: 'error',
+        sourceError: String(e),
+        rawCount: 0, dedupedCount: 0,
+        generatedAt: null, range: null,
+        fetchedAt: Date.now(),
+        isDemo: false,
       };
     }
-    return {
-      closures,
-      source: baselineSource ? baselineSource + (freshSource ? ' + live' : '') : freshSource,
-      sourceError: null,
-      baselineCount: baseline.length,
-      freshCount: fresh.length,
-      baselineLastDate,
-      generatedAt: null, range: null,
-      fetchedAt: Date.now(),
-      isDemo: false,
-    };
   }
 
   window.BclApi = {
     loadWithFallback,
     fetchHistoricalClosures,
-    fetchLiveSnapshot,
-    deriveLiveClosures,
     unpackClosures,
     normalizeClosure,
+    firstAppearanceDedupe,
     CLOSURES_LOCAL,
     CLOSURES_DIRECT,
-    REPORTS_URL,
   };
 })();
