@@ -276,9 +276,12 @@
     // Rank deltas
     const repsWithDelta = applyRankDeltas(reps, priorRanks ? priorRanks.reps : null);
     const vmiWithDelta  = applyRankDeltas(vmi,  priorRanks ? priorRanks.vmi  : null);
-    // Team progress (always against the current week — team league is weekly)
-    const weekScope = filterByPeriod(closures, 'week', now, null);
-    const team = buildTeamProgress(weekScope.closures, now, C.WEEKLY_TEAM_GOAL);
+    // Team thermometer follows the user's selected period so the numbers
+    // can't disagree with the page's other KPIs (Top Rep / MVP / Top 5 Reps
+    // are all period-scoped too). For non-'week' periods, the projection /
+    // daily-need math still runs but reads as 'this many dollars per day to
+    // hit goal across the selected window' — interpretable from context.
+    const team = buildTeamProgress(pf.closures, now, C.WEEKLY_TEAM_GOAL);
     // Activity feed (period scope)
     const feed = buildActivityFeed(pf.closures, now);
     // Executive highlights

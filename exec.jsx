@@ -70,7 +70,7 @@
           <div className="bcard p-5">
             <div className="flex items-end justify-between mb-2">
               <div>
-                <div className="text-[10px] uppercase tracking-wider font-semibold text-slate-500">Team Weekly Thermometer</div>
+                <div className="text-[10px] uppercase tracking-wider font-semibold text-slate-500">Team Thermometer <span className="text-slate-400 normal-case font-normal">— {state.periodLabel}</span></div>
                 <div className="font-mono tabular-nums text-[28px] font-semibold text-slate-900 leading-none mt-1">
                   {C.fmt$(t.total)}<span className="text-slate-400 text-[16px]"> / {C.fmt$(t.target)}</span>
                 </div>
