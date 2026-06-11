@@ -108,11 +108,13 @@
   // ---------- VMI classifier ----------
   // Word-level match. "Josh Novak" → VMI ✓ · "Joshua Smith" → not VMI ✗
   function isVmiRep(name) {
+    // VMI roster — must stay aligned with parent's apiAdapter.jsx normVmi.
+    // Anchored patterns: only Josh Novak / any Koen / any Curtis qualifies.
     if (!name || typeof name !== 'string') return false;
-    const n = name.toLowerCase().trim();
-    if (n === 'unassigned' || n === '—' || n === '-' || n === '') return false;
-    const words = n.split(/\s+/);
-    return words.some(w => VMI_REP_TOKENS.includes(w));
+    const t = name.trim();
+    return /^josh\s+novak\b/i.test(t)
+        || /^koen\b/i.test(t)
+        || /^curtis\b/i.test(t);
   }
 
   // ---------- URL/localStorage state ----------

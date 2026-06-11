@@ -54,6 +54,7 @@
     const [isLive, setIsLive]       = useState(false);
 
     const priorRanksRef   = useRef(null);
+    const flashTimersRef  = useRef([]);  // tracks pending row-flash timers for cleanup
     const priorBadgesRef  = useRef({ reps: new Map(), vmi: new Map() });
     const priorTeamPctRef = useRef(0);
     const emitterRef      = useRef(C.createEmitter());
@@ -124,7 +125,10 @@
         if (prevMap) for (const [name, rank] of prevMap.entries()) if (rank === 1) prevLeaderName = name;
         if (prevLeaderName && prevLeaderName !== top.name) {
           setFlashFirstName(f => ({ ...f, [div]: top.name }));
-          setTimeout(() => setFlashFirstName(f => ({ ...f, [div]: null })), 1800);
+          // Track the timer so the effect cleanup can cancel it if the
+          // component unmounts before the flash window finishes.
+          const _flashTimer = setTimeout(() => setFlashFirstName(f => ({ ...f, [div]: null })), 1800);
+          flashTimersRef.current.push(_flashTimer);
         }
       });
       const repsDiff = E.diffEarnedBadges(priorBadgesRef.current.reps, leagueState.reps, filteredClosures, 'reps', new Date());
@@ -132,6 +136,12 @@
       priorBadgesRef.current = { reps: repsDiff.newMap, vmi: vmiDiff.newMap };
       priorTeamPctRef.current = leagueState.team.pct;
       priorRanksRef.current = leagueState.newRankMaps;
+      // Cleanup: cancel any pending flash timers if leagueState changes again
+      // before they fire, or if the component unmounts.
+      return () => {
+        flashTimersRef.current.forEach(id => clearTimeout(id));
+        flashTimersRef.current = [];
+      };
     }, [leagueState]);
 
     useEffect(() => {
@@ -192,7 +202,7 @@
           <BrandToggle on={hideSungaze}  setOn={setHideSungaze}  label="Sungaze" />
 
           <span className="text-[10px] font-mono text-slate-500 small-caps ml-auto">
-            {leagueState.periodLabel} · {filteredClosures.length} of {data.closures.length} closures (spec v2026-06-08-c; ledger starts {C.MIN_CLOSURE_DATE})
+            {leagueState.periodLabel} · {filteredClosures.length} of {data.closures.length} closures (ledger starts {C.MIN_CLOSURE_DATE})
             {data.sourceError && <span className="text-rose-700 ml-2">· LOAD ERROR: {String(data.sourceError)}</span>}
           </span>
         </div>

@@ -26,22 +26,28 @@ jobs:
       - name: Fetch upstream closures.json
         run: |
           mkdir -p data
+          # Track whether ANY fetch succeeded — without this, an existing
+          # data/closures.json from checkout would keep the job green even
+          # when both sources fail, and the league would serve stale data.
+          FETCHED=0
+          # Only the raw github source is reliable here. The vercel.app
+          # fallback is gated by the password middleware and always 401s.
           for URL in \
-            "https://raw.githubusercontent.com/robertmckinley-alt/bamboo-sku-intelligence/main/data/closures.json" \
-            "https://bamboo-sku-intelligence.vercel.app/data/closures.json"
+            "https://raw.githubusercontent.com/robertmckinley-alt/bamboo-sku-intelligence/main/data/closures.json"
           do
             echo "trying $URL"
             if curl -sLf --compressed -m 30 -o data/closures.json.new "$URL"; then
               if python3 -c "import json; json.load(open('data/closures.json.new'))" 2>/dev/null; then
                 mv data/closures.json.new data/closures.json
+                FETCHED=1
                 echo "✓ fetched from $URL"
                 break
               fi
             fi
             rm -f data/closures.json.new
           done
-          if [ ! -f data/closures.json ]; then
-            echo "::error::no upstream source returned valid JSON"
+          if [ "$FETCHED" != "1" ]; then
+            echo "::error::no upstream source returned valid JSON — failing run"
             exit 1
           fi
           ls -la data/closures.json

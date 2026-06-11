@@ -17,7 +17,9 @@
 (function () {
   const C = window.BclCore;
   const CLOSURES_LOCAL  = './data/closures.json';
-  const CLOSURES_DIRECT = 'https://bamboo-sku-intelligence.vercel.app/data/closures.json';
+  // The Vercel app is behind a password gate, so it can't be a direct
+  // fallback from the league. Use raw.githubusercontent.com instead.
+  const CLOSURES_DIRECT = 'https://raw.githubusercontent.com/robertmckinley-alt/bamboo-sku-intelligence/main/data/closures.json';
 
   function unpackClosures(data) {
     if (Array.isArray(data)) return data;
