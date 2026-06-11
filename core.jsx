@@ -10,7 +10,7 @@
   // ordered before that was already on the books; from 5/28 forward any new
   // (store × SKU) appearance is a genuine first-time placement = a real closure.
   const MIN_CLOSURE_DATE = '2026-06-01';  // Ledger floor — 5/31 EOD is the baseline cutoff
-  const WEEKLY_REP_GOAL = 15000;
+  const WEEKLY_REP_GOAL = 20000;
   const WEEKLY_VMI_GOAL = 10000;
   const WEEKLY_TEAM_GOAL = 100000;
   // VMI reps per user spec: Josh, Koen, Curtis (matched as whole words).
