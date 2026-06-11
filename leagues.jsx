@@ -228,20 +228,45 @@
                 </tr>
               </thead>
               <tbody>
-                {weekHistory.map(w => {
-                  const wpct = w.total / C.WEEKLY_TEAM_GOAL;
-                  const status = wpct >= 1 ? 'AHEAD' : wpct >= 0.85 ? 'PACE' : 'BEHIND';
-                  return (
-                    <tr key={w.weekStart}>
-                      <td className="font-mono tabular-nums text-slate-700">{C.weekLabel(w.weekStart)}</td>
-                      <td className="text-right font-mono tabular-nums font-semibold text-emerald-700">{C.fmt$(w.total)}</td>
-                      <td className={`text-right font-mono tabular-nums ${wpct >= 1 ? 'text-emerald-700' : wpct >= 0.85 ? 'text-amber-700' : 'text-rose-700'}`}>{(wpct * 100).toFixed(0)}%</td>
-                      <td className="text-right font-mono tabular-nums text-slate-600">{C.fmtN(w.count)}</td>
-                      <td className="text-right text-slate-700 truncate max-w-[180px]" title={w.topRep}>{w.topRep || '—'}</td>
-                      <td><U.Tag tag={status} label={status} /></td>
-                    </tr>
-                  );
-                })}
+                {weekHistory
+                  // Only show weeks where data could exist (ledger starts 6/1).
+                  // Pre-ledger weeks would always read $0 / BEHIND and clutter
+                  // the table with noise.
+                  .filter(w => w.weekEnd >= C.MIN_CLOSURE_DATE)
+                  .map(w => {
+                    const todayS = C.ymd(new Date());
+                    const isCurrent = w.weekStart <= todayS && todayS <= w.weekEnd;
+                    const isFuture  = w.weekStart > todayS;
+                    const wpct = w.total / C.WEEKLY_TEAM_GOAL;
+                    let status, tone;
+                    if (isFuture) {
+                      status = '—'; tone = 'MONITOR';
+                    } else if (isCurrent) {
+                      // In-flight — use pace-adjusted thresholds so this row
+                      // agrees with the thermometer at the top of the page.
+                      const paceFrac = C.weekPaceFraction(new Date());
+                      if (wpct >= paceFrac * 0.98)      { status = 'AHEAD';  tone = 'AHEAD'; }
+                      else if (wpct >= paceFrac * 0.85) { status = 'PACE';   tone = 'PACE'; }
+                      else                              { status = 'BEHIND'; tone = 'BEHIND'; }
+                    } else {
+                      // Completed week — final tally vs goal. Use HIT / CLOSE
+                      // / MISSED so it's clear this is a finished result, not
+                      // an in-progress pace.
+                      if (wpct >= 1)         { status = 'HIT';    tone = 'AHEAD'; }
+                      else if (wpct >= 0.85) { status = 'CLOSE';  tone = 'PACE'; }
+                      else                   { status = 'MISSED'; tone = 'BEHIND'; }
+                    }
+                    return (
+                      <tr key={w.weekStart}>
+                        <td className="font-mono tabular-nums text-slate-700">{C.weekLabel(w.weekStart)}</td>
+                        <td className="text-right font-mono tabular-nums font-semibold text-emerald-700">{C.fmt$(w.total)}</td>
+                        <td className={`text-right font-mono tabular-nums ${wpct >= 1 ? 'text-emerald-700' : wpct >= 0.85 ? 'text-amber-700' : 'text-rose-700'}`}>{(wpct * 100).toFixed(0)}%</td>
+                        <td className="text-right font-mono tabular-nums text-slate-600">{C.fmtN(w.count)}</td>
+                        <td className="text-right text-slate-700 truncate max-w-[180px]" title={w.topRep}>{w.topRep || '—'}</td>
+                        <td><U.Tag tag={tone} label={status} /></td>
+                      </tr>
+                    );
+                  })}
               </tbody>
             </table>
           </div>
