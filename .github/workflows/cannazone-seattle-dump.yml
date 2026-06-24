@@ -11,94 +11,182 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Fetch + slice
+      - name: Install openpyxl
+        run: pip install --quiet openpyxl
+      - name: Fetch + build spreadsheet
         run: |
           python3 <<'PY'
-          import json, urllib.request, os
+          import json, urllib.request, gzip, io, os
+          from collections import defaultdict
           req = urllib.request.Request('https://api-intelligence.getbamboo.com/api/reports',
                                         headers={'Accept-Encoding': 'gzip'})
           with urllib.request.urlopen(req, timeout=60) as r:
-              import gzip, io
               raw = r.read()
               if r.headers.get('Content-Encoding') == 'gzip':
                   raw = gzip.decompress(raw)
               d = json.loads(raw)
           dims = d['dimensions']
-          # Index lookups
           def colidx(dim, name):
-              return dim.get('columns', []).index(name) if name in dim.get('columns', []) else -1
-          cli, prod, retc, perfc, brand = dims['clients'], dims['products'], dims.get('retail_categories', {'rows':[]}), dims.get('performance_categories', {'rows':[]}), dims.get('brands', {'rows':[]})
+              cols = dim.get('columns', []) if isinstance(dim, dict) else []
+              return cols.index(name) if name in cols else -1
+          cli, prod = dims['clients'], dims['products']
+          retc  = dims.get('retail_categories', {'rows':[],'columns':['id','name']})
+          perfc = dims.get('performance_categories', {'rows':[],'columns':['id','name']})
+          brand = dims.get('brands', {'rows':[],'columns':['id','name']})
           ci_name = colidx(cli, 'name')
           pi_name = colidx(prod, 'name')
           pi_brand = colidx(prod, 'brand_idx')
           pi_retcat = colidx(prod, 'retail_category_idx')
           pi_perfcat = colidx(prod, 'performance_category_idx')
-          retc_name = colidx(retc, 'name') if retc.get('rows') else 1
-          perfc_name = colidx(perfc, 'name') if perfc.get('rows') else 1
-          brand_name = colidx(brand, 'name') if brand.get('rows') else 1
-          # Find Cannazone Seattle (exact match preferred)
+          ni = lambda dim: colidx(dim, 'name')
           targets = []
           for idx, r in enumerate(cli['rows']):
               if not r: continue
-              n = (r[ci_name] or '').lower() if ci_name>=0 else (r[1] or '').lower()
+              n = (r[ci_name] or '').lower()
               if 'cannazone seattle' in n:
-                  targets.append({'idx': idx, 'name': r[ci_name] if ci_name>=0 else r[1]})
+                  targets.append({'idx': idx, 'name': r[ci_name]})
           if not targets:
               for idx, r in enumerate(cli['rows']):
                   if not r: continue
-                  n = (r[ci_name] or '').lower() if ci_name>=0 else (r[1] or '').lower()
+                  n = (r[ci_name] or '').lower()
                   if 'cannazone' in n:
-                      targets.append({'idx': idx, 'name': r[ci_name] if ci_name>=0 else r[1]})
-          target_idxs = set(t['idx'] for t in targets)
-          # Walk client_product_sales
+                      targets.append({'idx': idx, 'name': r[ci_name]})
+          target_idxs = {t['idx'] for t in targets}
           cps = d['facts']['client_product_sales']
           rows = cps['row']; cols = cps['col']
           revs = cps.get('revenue_cents', [])
           units = cps.get('units', [])
           ts = cps.get('last_ordered_at_utc', [])
-          out_rows = []
+          line_rows = []
           for i in range(len(rows)):
               ci = rows[i]
               if ci not in target_idxs: continue
               pi = cols[i]
               prod_row = prod['rows'][pi] if pi < len(prod['rows']) else None
               if not prod_row: continue
-              name = prod_row[pi_name] if pi_name>=0 else prod_row[1]
+              p_name = prod_row[pi_name] if pi_name>=0 else ''
               bidx = prod_row[pi_brand] if pi_brand>=0 and len(prod_row)>pi_brand else None
               ridx = prod_row[pi_retcat] if pi_retcat>=0 and len(prod_row)>pi_retcat else None
               gidx = prod_row[pi_perfcat] if pi_perfcat>=0 and len(prod_row)>pi_perfcat else None
-              brand_name_str = brand['rows'][bidx][brand_name] if bidx is not None and bidx < len(brand.get('rows',[])) else ''
-              retcat_name_str = retc['rows'][ridx][retc_name] if ridx is not None and ridx < len(retc.get('rows',[])) else ''
-              perfcat_name_str = perfc['rows'][gidx][perfc_name] if gidx is not None and gidx < len(perfc.get('rows',[])) else ''
+              def nm(dim, idx2):
+                  if idx2 is None: return ''
+                  if 0 <= idx2 < len(dim.get('rows',[])):
+                      return dim['rows'][idx2][ni(dim)] if ni(dim) >= 0 else (dim['rows'][idx2][1] if len(dim['rows'][idx2])>1 else '')
+                  return ''
+              brand_str = nm(brand, bidx)
+              retcat_str = nm(retc, ridx)
+              perfcat_str = nm(perfc, gidx)
               cli_row = cli['rows'][ci]
-              client_name = cli_row[ci_name] if ci_name>=0 else cli_row[1]
-              out_rows.append({
-                  'client': client_name,
-                  'product': name,
-                  'sku_group': perfcat_name_str,
-                  'retail_category': retcat_name_str,
-                  'brand': brand_name_str,
-                  'revenue_dollars': round((revs[i] or 0)/100, 2),
+              line_rows.append({
+                  'client': cli_row[ci_name],
+                  'sku_group': perfcat_str,
+                  'product': p_name,
+                  'brand': brand_str,
+                  'retail_category': retcat_str,
                   'units': units[i] or 0,
+                  'revenue': round((revs[i] or 0)/100, 2),
                   'last_ordered_at_utc': ts[i] if i < len(ts) else None,
               })
-          dump = {
-              'generated_at': d.get('generated_at'),
-              'range': d.get('range'),
-              'targets': targets,
-              'rows': out_rows,
-              'row_count': len(out_rows),
-          }
           os.makedirs('data', exist_ok=True)
-          with open('data/cannazone-seattle.json', 'w') as f:
-              json.dump(dump, f, indent=1)
-          print('Wrote', len(out_rows), 'rows for', len(targets), 'Cannazone target(s)')
+          with open('data/cannazone-seattle.json','w') as f:
+              json.dump({'generated_at': d.get('generated_at'), 'range': d.get('range'), 'targets': targets, 'row_count': len(line_rows), 'rows': line_rows}, f, indent=1)
+          from openpyxl import Workbook
+          from openpyxl.styles import Font, PatternFill, Alignment
+          wb = Workbook()
+          ws = wb.active
+          ws.title = 'Summary'
+          ws['A1'] = 'Cannazone Seattle - YTD purchases'
+          ws['A1'].font = Font(size=16, bold=True, color='FFFFFF')
+          ws['A1'].fill = PatternFill('solid', fgColor='047857')
+          ws.merge_cells('A1:D1')
+          ws['A3'] = 'API generated_at'; ws['B3'] = d.get('generated_at','')
+          ws['A4'] = 'API range';        ws['B4'] = json.dumps(d.get('range'))
+          ws['A5'] = 'Stores matched';   ws['B5'] = ', '.join(t['name'] for t in targets)
+          total_rev = sum(r['revenue'] for r in line_rows)
+          total_units = sum(r['units'] for r in line_rows)
+          ws['A7'] = 'Total revenue';   ws['B7'] = total_rev; ws['B7'].number_format = '$#,##0.00'
+          ws['A8'] = 'Total units';     ws['B8'] = total_units; ws['B8'].number_format = '#,##0'
+          ws['A9'] = 'Distinct products'; ws['B9'] = len({r['product'] for r in line_rows})
+          ws['A10'] = 'Distinct SKU groups'; ws['B10'] = len({r['sku_group'] for r in line_rows})
+          for r in range(3, 11):
+              ws.cell(row=r, column=1).font = Font(bold=True)
+          ws.column_dimensions['A'].width = 25
+          ws.column_dimensions['B'].width = 60
+          ws = wb.create_sheet('By SKU Group')
+          for c, h in enumerate(['SKU Group','Revenue','Units','Product Lines','Avg per Line','Last Order'], 1):
+              cell = ws.cell(row=1, column=c, value=h)
+              cell.font = Font(bold=True, color='FFFFFF')
+              cell.fill = PatternFill('solid', fgColor='047857')
+              cell.alignment = Alignment(horizontal='center')
+          by_g = defaultdict(lambda: {'rev':0,'units':0,'lines':0,'last':''})
+          for r in line_rows:
+              g = r['sku_group'] or '(no group)'
+              by_g[g]['rev']   += r['revenue']
+              by_g[g]['units'] += r['units']
+              by_g[g]['lines'] += 1
+              if r['last_ordered_at_utc'] and r['last_ordered_at_utc'] > by_g[g]['last']:
+                  by_g[g]['last'] = r['last_ordered_at_utc']
+          row_n = 2
+          for g, v in sorted(by_g.items(), key=lambda x: -x[1]['rev']):
+              ws.cell(row=row_n, column=1, value=g)
+              ws.cell(row=row_n, column=2, value=v['rev']).number_format = '$#,##0.00'
+              ws.cell(row=row_n, column=3, value=v['units']).number_format = '#,##0'
+              ws.cell(row=row_n, column=4, value=v['lines']).number_format = '#,##0'
+              avg = v['rev']/v['lines'] if v['lines'] else 0
+              ws.cell(row=row_n, column=5, value=avg).number_format = '$#,##0.00'
+              ws.cell(row=row_n, column=6, value=v['last'][:10] if v['last'] else '')
+              row_n += 1
+          ws.cell(row=row_n, column=1, value='TOTAL').font = Font(bold=True)
+          ws.cell(row=row_n, column=2, value=sum(v['rev'] for v in by_g.values())).number_format = '$#,##0.00'
+          ws.cell(row=row_n, column=2).font = Font(bold=True)
+          ws.cell(row=row_n, column=3, value=sum(v['units'] for v in by_g.values())).number_format = '#,##0'
+          ws.cell(row=row_n, column=3).font = Font(bold=True)
+          ws.cell(row=row_n, column=4, value=sum(v['lines'] for v in by_g.values())).number_format = '#,##0'
+          ws.cell(row=row_n, column=4).font = Font(bold=True)
+          ws.freeze_panes = 'A2'
+          ws.column_dimensions['A'].width = 45
+          for c in 'BCDEF':
+              ws.column_dimensions[c].width = 16
+          ws = wb.create_sheet('By Product')
+          for c, h in enumerate(['Product','SKU Group','Brand','Retail Category','Revenue','Units','Last Order'], 1):
+              cell = ws.cell(row=1, column=c, value=h)
+              cell.font = Font(bold=True, color='FFFFFF')
+              cell.fill = PatternFill('solid', fgColor='047857')
+              cell.alignment = Alignment(horizontal='center')
+          by_p = {}
+          for r in line_rows:
+              k = r['product']
+              if k not in by_p:
+                  by_p[k] = {'group': r['sku_group'], 'brand': r['brand'], 'cat': r['retail_category'],
+                             'rev':0, 'units':0, 'last':''}
+              by_p[k]['rev']   += r['revenue']
+              by_p[k]['units'] += r['units']
+              if r['last_ordered_at_utc'] and r['last_ordered_at_utc'] > by_p[k]['last']:
+                  by_p[k]['last'] = r['last_ordered_at_utc']
+          row_n = 2
+          for prod_name, v in sorted(by_p.items(), key=lambda x: -x[1]['rev']):
+              ws.cell(row=row_n, column=1, value=prod_name)
+              ws.cell(row=row_n, column=2, value=v['group'])
+              ws.cell(row=row_n, column=3, value=v['brand'])
+              ws.cell(row=row_n, column=4, value=v['cat'])
+              ws.cell(row=row_n, column=5, value=v['rev']).number_format = '$#,##0.00'
+              ws.cell(row=row_n, column=6, value=v['units']).number_format = '#,##0'
+              ws.cell(row=row_n, column=7, value=v['last'][:10] if v['last'] else '')
+              row_n += 1
+          ws.freeze_panes = 'A2'
+          ws.column_dimensions['A'].width = 50
+          ws.column_dimensions['B'].width = 35
+          ws.column_dimensions['C'].width = 22
+          ws.column_dimensions['D'].width = 18
+          for c in 'EFG':
+              ws.column_dimensions[c].width = 14
+          wb.save('data/cannazone-seattle-ytd.xlsx')
+          print('Wrote xlsx with', len(line_rows), 'lines,', len(by_g), 'groups,', len(by_p), 'products')
           PY
-          ls -la data/cannazone-seattle.json
-          head -c 1000 data/cannazone-seattle.json
+          ls -la data/
       - name: Commit
         run: |
           git config user.name  "cannazone-dump-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add data/cannazone-seattle.json
-          if git diff --cached --quiet; then echo "no changes"; else git commit -m "dump Cannazone Seattle YTD" && git push; fi
+          git add data/cannazone-seattle.json data/cannazone-seattle-ytd.xlsx
+          if git diff --cached --quiet; then echo "no changes"; else git commit -m "Cannazone Seattle YTD spreadsheet" && git push; fi
