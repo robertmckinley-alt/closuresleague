@@ -13,10 +13,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install openpyxl
         run: pip install --quiet openpyxl
-      - name: Fetch + build spreadsheet
+      - name: Fetch + build outputs
         run: |
           python3 <<'PY'
-          import json, urllib.request, gzip, io, os
+          import json, urllib.request, gzip, csv, os
           from collections import defaultdict
           req = urllib.request.Request('https://api-intelligence.getbamboo.com/api/reports',
                                         headers={'Accept-Encoding': 'gzip'})
@@ -45,12 +45,6 @@ jobs:
               n = (r[ci_name] or '').lower()
               if 'cannazone seattle' in n:
                   targets.append({'idx': idx, 'name': r[ci_name]})
-          if not targets:
-              for idx, r in enumerate(cli['rows']):
-                  if not r: continue
-                  n = (r[ci_name] or '').lower()
-                  if 'cannazone' in n:
-                      targets.append({'idx': idx, 'name': r[ci_name]})
           target_idxs = {t['idx'] for t in targets}
           cps = d['facts']['client_product_sales']
           rows = cps['row']; cols = cps['col']
@@ -73,23 +67,40 @@ jobs:
                   if 0 <= idx2 < len(dim.get('rows',[])):
                       return dim['rows'][idx2][ni(dim)] if ni(dim) >= 0 else (dim['rows'][idx2][1] if len(dim['rows'][idx2])>1 else '')
                   return ''
-              brand_str = nm(brand, bidx)
-              retcat_str = nm(retc, ridx)
-              perfcat_str = nm(perfc, gidx)
-              cli_row = cli['rows'][ci]
               line_rows.append({
-                  'client': cli_row[ci_name],
-                  'sku_group': perfcat_str,
-                  'product': p_name,
-                  'brand': brand_str,
-                  'retail_category': retcat_str,
-                  'units': units[i] or 0,
-                  'revenue': round((revs[i] or 0)/100, 2),
-                  'last_ordered_at_utc': ts[i] if i < len(ts) else None,
+                  'sku_group': nm(perfc, gidx),
+                  'product':   p_name,
+                  'brand':     nm(brand, bidx),
+                  'retail_category': nm(retc, ridx),
+                  'units':     units[i] or 0,
+                  'revenue':   round((revs[i] or 0)/100, 2),
+                  'last_ordered_at_utc': (ts[i] or '')[:10],
               })
           os.makedirs('data', exist_ok=True)
-          with open('data/cannazone-seattle.json','w') as f:
-              json.dump({'generated_at': d.get('generated_at'), 'range': d.get('range'), 'targets': targets, 'row_count': len(line_rows), 'rows': line_rows}, f, indent=1)
+          # --- CSV 1: by product ---
+          line_rows.sort(key=lambda r: -r['revenue'])
+          with open('data/cannazone-by-product.csv','w', newline='') as f:
+              w = csv.writer(f)
+              w.writerow(['Product','SKU Group','Brand','Retail Category','Revenue','Units','Last Order'])
+              for r in line_rows:
+                  w.writerow([r['product'], r['sku_group'], r['brand'], r['retail_category'],
+                              r['revenue'], r['units'], r['last_ordered_at_utc']])
+          # --- CSV 2: by SKU group ---
+          by_g = defaultdict(lambda: {'rev':0,'units':0,'lines':0,'last':''})
+          for r in line_rows:
+              g = r['sku_group'] or '(no group)'
+              by_g[g]['rev']   += r['revenue']
+              by_g[g]['units'] += r['units']
+              by_g[g]['lines'] += 1
+              if r['last_ordered_at_utc'] and r['last_ordered_at_utc'] > by_g[g]['last']:
+                  by_g[g]['last'] = r['last_ordered_at_utc']
+          with open('data/cannazone-by-group.csv','w', newline='') as f:
+              w = csv.writer(f)
+              w.writerow(['SKU Group','Revenue','Units','Product Lines','Avg Per Line','Last Order'])
+              for g, v in sorted(by_g.items(), key=lambda x: -x[1]['rev']):
+                  avg = round(v['rev']/v['lines'],2) if v['lines'] else 0
+                  w.writerow([g, round(v['rev'],2), v['units'], v['lines'], avg, v['last']])
+          # --- Original xlsx (Summary + tabs) ---
           from openpyxl import Workbook
           from openpyxl.styles import Font, PatternFill, Alignment
           wb = Workbook()
@@ -102,91 +113,60 @@ jobs:
           ws['A3'] = 'API generated_at'; ws['B3'] = d.get('generated_at','')
           ws['A4'] = 'API range';        ws['B4'] = json.dumps(d.get('range'))
           ws['A5'] = 'Stores matched';   ws['B5'] = ', '.join(t['name'] for t in targets)
-          total_rev = sum(r['revenue'] for r in line_rows)
-          total_units = sum(r['units'] for r in line_rows)
-          ws['A7'] = 'Total revenue';   ws['B7'] = total_rev; ws['B7'].number_format = '$#,##0.00'
-          ws['A8'] = 'Total units';     ws['B8'] = total_units; ws['B8'].number_format = '#,##0'
+          ws['A7'] = 'Total revenue';   ws['B7'] = sum(r['revenue'] for r in line_rows); ws['B7'].number_format = '$#,##0.00'
+          ws['A8'] = 'Total units';     ws['B8'] = sum(r['units'] for r in line_rows); ws['B8'].number_format = '#,##0'
           ws['A9'] = 'Distinct products'; ws['B9'] = len({r['product'] for r in line_rows})
           ws['A10'] = 'Distinct SKU groups'; ws['B10'] = len({r['sku_group'] for r in line_rows})
           for r in range(3, 11):
               ws.cell(row=r, column=1).font = Font(bold=True)
-          ws.column_dimensions['A'].width = 25
-          ws.column_dimensions['B'].width = 60
+          ws.column_dimensions['A'].width = 25; ws.column_dimensions['B'].width = 60
           ws = wb.create_sheet('By SKU Group')
           for c, h in enumerate(['SKU Group','Revenue','Units','Product Lines','Avg per Line','Last Order'], 1):
               cell = ws.cell(row=1, column=c, value=h)
-              cell.font = Font(bold=True, color='FFFFFF')
-              cell.fill = PatternFill('solid', fgColor='047857')
-              cell.alignment = Alignment(horizontal='center')
-          by_g = defaultdict(lambda: {'rev':0,'units':0,'lines':0,'last':''})
-          for r in line_rows:
-              g = r['sku_group'] or '(no group)'
-              by_g[g]['rev']   += r['revenue']
-              by_g[g]['units'] += r['units']
-              by_g[g]['lines'] += 1
-              if r['last_ordered_at_utc'] and r['last_ordered_at_utc'] > by_g[g]['last']:
-                  by_g[g]['last'] = r['last_ordered_at_utc']
+              cell.font = Font(bold=True, color='FFFFFF'); cell.fill = PatternFill('solid', fgColor='047857')
           row_n = 2
           for g, v in sorted(by_g.items(), key=lambda x: -x[1]['rev']):
               ws.cell(row=row_n, column=1, value=g)
               ws.cell(row=row_n, column=2, value=v['rev']).number_format = '$#,##0.00'
               ws.cell(row=row_n, column=3, value=v['units']).number_format = '#,##0'
               ws.cell(row=row_n, column=4, value=v['lines']).number_format = '#,##0'
-              avg = v['rev']/v['lines'] if v['lines'] else 0
-              ws.cell(row=row_n, column=5, value=avg).number_format = '$#,##0.00'
-              ws.cell(row=row_n, column=6, value=v['last'][:10] if v['last'] else '')
+              ws.cell(row=row_n, column=5, value=v['rev']/v['lines'] if v['lines'] else 0).number_format = '$#,##0.00'
+              ws.cell(row=row_n, column=6, value=v['last'])
               row_n += 1
-          ws.cell(row=row_n, column=1, value='TOTAL').font = Font(bold=True)
-          ws.cell(row=row_n, column=2, value=sum(v['rev'] for v in by_g.values())).number_format = '$#,##0.00'
-          ws.cell(row=row_n, column=2).font = Font(bold=True)
-          ws.cell(row=row_n, column=3, value=sum(v['units'] for v in by_g.values())).number_format = '#,##0'
-          ws.cell(row=row_n, column=3).font = Font(bold=True)
-          ws.cell(row=row_n, column=4, value=sum(v['lines'] for v in by_g.values())).number_format = '#,##0'
-          ws.cell(row=row_n, column=4).font = Font(bold=True)
-          ws.freeze_panes = 'A2'
-          ws.column_dimensions['A'].width = 45
-          for c in 'BCDEF':
-              ws.column_dimensions[c].width = 16
+          ws.freeze_panes = 'A2'; ws.column_dimensions['A'].width = 45
+          for c in 'BCDEF': ws.column_dimensions[c].width = 16
           ws = wb.create_sheet('By Product')
           for c, h in enumerate(['Product','SKU Group','Brand','Retail Category','Revenue','Units','Last Order'], 1):
               cell = ws.cell(row=1, column=c, value=h)
-              cell.font = Font(bold=True, color='FFFFFF')
-              cell.fill = PatternFill('solid', fgColor='047857')
-              cell.alignment = Alignment(horizontal='center')
-          by_p = {}
-          for r in line_rows:
-              k = r['product']
-              if k not in by_p:
-                  by_p[k] = {'group': r['sku_group'], 'brand': r['brand'], 'cat': r['retail_category'],
-                             'rev':0, 'units':0, 'last':''}
-              by_p[k]['rev']   += r['revenue']
-              by_p[k]['units'] += r['units']
-              if r['last_ordered_at_utc'] and r['last_ordered_at_utc'] > by_p[k]['last']:
-                  by_p[k]['last'] = r['last_ordered_at_utc']
+              cell.font = Font(bold=True, color='FFFFFF'); cell.fill = PatternFill('solid', fgColor='047857')
           row_n = 2
-          for prod_name, v in sorted(by_p.items(), key=lambda x: -x[1]['rev']):
-              ws.cell(row=row_n, column=1, value=prod_name)
-              ws.cell(row=row_n, column=2, value=v['group'])
-              ws.cell(row=row_n, column=3, value=v['brand'])
-              ws.cell(row=row_n, column=4, value=v['cat'])
-              ws.cell(row=row_n, column=5, value=v['rev']).number_format = '$#,##0.00'
-              ws.cell(row=row_n, column=6, value=v['units']).number_format = '#,##0'
-              ws.cell(row=row_n, column=7, value=v['last'][:10] if v['last'] else '')
+          for r in line_rows:
+              ws.cell(row=row_n, column=1, value=r['product'])
+              ws.cell(row=row_n, column=2, value=r['sku_group'])
+              ws.cell(row=row_n, column=3, value=r['brand'])
+              ws.cell(row=row_n, column=4, value=r['retail_category'])
+              ws.cell(row=row_n, column=5, value=r['revenue']).number_format = '$#,##0.00'
+              ws.cell(row=row_n, column=6, value=r['units']).number_format = '#,##0'
+              ws.cell(row=row_n, column=7, value=r['last_ordered_at_utc'])
               row_n += 1
-          ws.freeze_panes = 'A2'
-          ws.column_dimensions['A'].width = 50
-          ws.column_dimensions['B'].width = 35
-          ws.column_dimensions['C'].width = 22
+          ws.freeze_panes = 'A2'; ws.column_dimensions['A'].width = 50
+          ws.column_dimensions['B'].width = 35; ws.column_dimensions['C'].width = 22
           ws.column_dimensions['D'].width = 18
-          for c in 'EFG':
-              ws.column_dimensions[c].width = 14
+          for c in 'EFG': ws.column_dimensions[c].width = 14
           wb.save('data/cannazone-seattle-ytd.xlsx')
-          print('Wrote xlsx with', len(line_rows), 'lines,', len(by_g), 'groups,', len(by_p), 'products')
+          # Save raw json too
+          with open('data/cannazone-seattle.json','w') as f:
+              json.dump({'generated_at': d.get('generated_at'), 'range': d.get('range'),
+                         'targets': targets, 'row_count': len(line_rows), 'rows': line_rows}, f, indent=1)
+          print('Wrote', len(line_rows), 'rows,', len(by_g), 'groups')
+          print('CSV sizes:')
+          for fn in ('data/cannazone-by-product.csv','data/cannazone-by-group.csv'):
+              print('  ', fn, os.path.getsize(fn), 'bytes')
           PY
           ls -la data/
       - name: Commit
         run: |
           git config user.name  "cannazone-dump-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add data/cannazone-seattle.json data/cannazone-seattle-ytd.xlsx
-          if git diff --cached --quiet; then echo "no changes"; else git commit -m "Cannazone Seattle YTD spreadsheet" && git push; fi
+          git add data/cannazone-seattle.json data/cannazone-seattle-ytd.xlsx data/cannazone-by-product.csv data/cannazone-by-group.csv
+          if git diff --cached --quiet; then echo "no changes"; else git commit -m "Cannazone Seattle YTD outputs" && git push; fi
