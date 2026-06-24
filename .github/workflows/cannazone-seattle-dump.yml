@@ -1,0 +1,104 @@
+name: Dump Cannazone Seattle YTD purchases
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch + slice
+        run: |
+          python3 <<'PY'
+          import json, urllib.request, os
+          req = urllib.request.Request('https://api-intelligence.getbamboo.com/api/reports',
+                                        headers={'Accept-Encoding': 'gzip'})
+          with urllib.request.urlopen(req, timeout=60) as r:
+              import gzip, io
+              raw = r.read()
+              if r.headers.get('Content-Encoding') == 'gzip':
+                  raw = gzip.decompress(raw)
+              d = json.loads(raw)
+          dims = d['dimensions']
+          # Index lookups
+          def colidx(dim, name):
+              return dim.get('columns', []).index(name) if name in dim.get('columns', []) else -1
+          cli, prod, retc, perfc, brand = dims['clients'], dims['products'], dims.get('retail_categories', {'rows':[]}), dims.get('performance_categories', {'rows':[]}), dims.get('brands', {'rows':[]})
+          ci_name = colidx(cli, 'name')
+          pi_name = colidx(prod, 'name')
+          pi_brand = colidx(prod, 'brand_idx')
+          pi_retcat = colidx(prod, 'retail_category_idx')
+          pi_perfcat = colidx(prod, 'performance_category_idx')
+          retc_name = colidx(retc, 'name') if retc.get('rows') else 1
+          perfc_name = colidx(perfc, 'name') if perfc.get('rows') else 1
+          brand_name = colidx(brand, 'name') if brand.get('rows') else 1
+          # Find Cannazone Seattle (exact match preferred)
+          targets = []
+          for idx, r in enumerate(cli['rows']):
+              if not r: continue
+              n = (r[ci_name] or '').lower() if ci_name>=0 else (r[1] or '').lower()
+              if 'cannazone seattle' in n:
+                  targets.append({'idx': idx, 'name': r[ci_name] if ci_name>=0 else r[1]})
+          if not targets:
+              for idx, r in enumerate(cli['rows']):
+                  if not r: continue
+                  n = (r[ci_name] or '').lower() if ci_name>=0 else (r[1] or '').lower()
+                  if 'cannazone' in n:
+                      targets.append({'idx': idx, 'name': r[ci_name] if ci_name>=0 else r[1]})
+          target_idxs = set(t['idx'] for t in targets)
+          # Walk client_product_sales
+          cps = d['facts']['client_product_sales']
+          rows = cps['row']; cols = cps['col']
+          revs = cps.get('revenue_cents', [])
+          units = cps.get('units', [])
+          ts = cps.get('last_ordered_at_utc', [])
+          out_rows = []
+          for i in range(len(rows)):
+              ci = rows[i]
+              if ci not in target_idxs: continue
+              pi = cols[i]
+              prod_row = prod['rows'][pi] if pi < len(prod['rows']) else None
+              if not prod_row: continue
+              name = prod_row[pi_name] if pi_name>=0 else prod_row[1]
+              bidx = prod_row[pi_brand] if pi_brand>=0 and len(prod_row)>pi_brand else None
+              ridx = prod_row[pi_retcat] if pi_retcat>=0 and len(prod_row)>pi_retcat else None
+              gidx = prod_row[pi_perfcat] if pi_perfcat>=0 and len(prod_row)>pi_perfcat else None
+              brand_name_str = brand['rows'][bidx][brand_name] if bidx is not None and bidx < len(brand.get('rows',[])) else ''
+              retcat_name_str = retc['rows'][ridx][retc_name] if ridx is not None and ridx < len(retc.get('rows',[])) else ''
+              perfcat_name_str = perfc['rows'][gidx][perfc_name] if gidx is not None and gidx < len(perfc.get('rows',[])) else ''
+              cli_row = cli['rows'][ci]
+              client_name = cli_row[ci_name] if ci_name>=0 else cli_row[1]
+              out_rows.append({
+                  'client': client_name,
+                  'product': name,
+                  'sku_group': perfcat_name_str,
+                  'retail_category': retcat_name_str,
+                  'brand': brand_name_str,
+                  'revenue_dollars': round((revs[i] or 0)/100, 2),
+                  'units': units[i] or 0,
+                  'last_ordered_at_utc': ts[i] if i < len(ts) else None,
+              })
+          dump = {
+              'generated_at': d.get('generated_at'),
+              'range': d.get('range'),
+              'targets': targets,
+              'rows': out_rows,
+              'row_count': len(out_rows),
+          }
+          os.makedirs('data', exist_ok=True)
+          with open('data/cannazone-seattle.json', 'w') as f:
+              json.dump(dump, f, indent=1)
+          print('Wrote', len(out_rows), 'rows for', len(targets), 'Cannazone target(s)')
+          PY
+          ls -la data/cannazone-seattle.json
+          head -c 1000 data/cannazone-seattle.json
+      - name: Commit
+        run: |
+          git config user.name  "cannazone-dump-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add data/cannazone-seattle.json
+          if git diff --cached --quiet; then echo "no changes"; else git commit -m "dump Cannazone Seattle YTD" && git push; fi
