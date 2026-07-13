@@ -1,25 +1,26 @@
 /* ============================================================================
- * apiAdapter.jsx — Data fetching for Closures League.
+ * apiAdapter.jsx — Closures League · Final Definition rev 3 (2026-07-13)
  *
- * Source of truth: ./data/closures.json (mirrored from Bamboo SKU Intelligence
- * by .github/workflows/sync-closures.yml every 5 minutes). The parent repo
- * implements the closure spec (see its data/tracker_meta.json -> spec_version
- * 2026-06-08-c): top-20 priority retail-categories track their top-10 SKUs at
- * SKU level, every other category (including all of Dabstract) collapses to
- * one closure per (store, retail_category) per wave of new SKUs. The league
- * just consumes the file — no re-validation here.
+ * Client-side re-derivation of closures from upstream closures.json.
  *
- * Schema each row arrives with:
- *   { ts, clientName, skuName, category, rev, units, sr, vr, type, skuGroup, closureKind }
+ * The upstream file contains BOTH first-time placements AND weekly top-sellers
+ * for every store — over half the rows are repeats of a (store, skuGroup) pair
+ * that already appeared on an earlier date. It also mis-labels some rows as
+ * `cat-new` when the category was already selling at that store.
  *
- * type / closureKind values: "top-sku" | "cat-new" | "cat-expansion"
+ * Fix:
+ *   1) Walk rows in chronological order.
+ *   2) Dedup by (clientName, skuGroup) — keep the earliest ts, discard the rest
+ *      (this removes ALL weekly-top-seller repeats).
+ *   3) Retag closureKind from scratch:
+ *        - 'cat-new'  if this is ALSO the earliest (clientName, category) seen
+ *        - 'grp-new'  if the category was already sold at that store earlier
+ *   Upstream `closureKind` / `top-sku` values are ignored.
  * ============================================================================ */
 (function () {
   const C = window.BclCore;
   const CLOSURES_LOCAL  = './data/closures.json';
-  // The Vercel app is behind a password gate, so it can't be a direct
-  // fallback from the league. Use raw.githubusercontent.com instead.
-  const CLOSURES_DIRECT = 'https://raw.githubusercontent.com/robertmckinley-alt/bamboo-sku-intelligence/main/data/closures.json';
+  const CLOSURES_DIRECT = 'https://bamboo-sku-intelligence.vercel.app/data/closures.json';
 
   function unpackClosures(data) {
     if (Array.isArray(data)) return data;
@@ -34,20 +35,63 @@
   }
 
   function normalizeRow(r) {
-    const ts = (typeof r.ts === 'string') ? r.ts.slice(0, 10) : C.ymd(r.ts);
-    const kind = String(r.closureKind || r.type || 'top-sku').trim().toLowerCase();
+    const ts = (typeof r.ts === 'string') ? r.ts.slice(0, 10) : (C && C.ymd ? C.ymd(r.ts) : '');
     return {
       ts,
-      clientName: String(r.clientName || r.client || '').trim(),
-      skuName: String(r.skuName || r.sku || '').trim(),
-      skuGroup: String(r.skuGroup || r.sku_group || r.skuName || '').trim(),
-      category: String(r.category || r.cat || 'Other').trim(),
-      rev: Number(r.rev || r.revenue || 0),
-      units: Number(r.units || r.u || 0),
-      sr: String(r.sr || r.salesRep || r.rep || 'Unassigned').trim(),
-      vr: String(r.vr || r.vmiRep || 'Unassigned').trim(),
-      type: kind,
-      closureKind: kind,
+      clientName: String(r.clientName || r.client || r.store || '').trim(),
+      skuName:    String(r.skuName    || r.sku    || r.product || '').trim(),
+      skuGroup:   String(r.skuGroup   || r.sku_group || r.skuName || '').trim(),
+      category:   String(r.category   || r.cat || 'Other').trim(),
+      rev:        Number(r.rev || r.revenue || 0),
+      units:      Number(r.units || r.u || 0),
+      sr:         String(r.sr || r.salesRep || r.rep || 'Unassigned').trim(),
+      vr:         String(r.vr || r.vmiRep || 'Unassigned').trim(),
+      type:       String(r.type || 'group').trim().toLowerCase(),
+      closureKind: String(r.closureKind || '').trim(),
+    };
+  }
+
+  // Backwards-compat alias — some callers use normalizeClosure().
+  function normalizeClosure(r) { return normalizeRow(r); }
+
+  // Chronological dedup + retag.
+  // Input:  array of normalized rows.
+  // Output: { closures, validCount, groupBaselineSize, categoryBaselineSize }.
+  function deriveClosures(allRows) {
+    // Sort ascending by ts (skuName as tiebreaker so the result is stable).
+    const sorted = allRows.slice().sort((a, b) => {
+      if (a.ts !== b.ts) return a.ts < b.ts ? -1 : 1;
+      return (a.skuName || '') < (b.skuName || '') ? -1 : 1;
+    });
+
+    // 1) Dedup by (clientName, skuGroup) — earliest wins.
+    //    This drops upstream "top-sku" weekly-winner repeats.
+    const seenGroup = new Set();
+    const deduped = [];
+    for (const c of sorted) {
+      if (!c.clientName || !c.skuGroup) continue;
+      const k = c.clientName + '||' + c.skuGroup;
+      if (seenGroup.has(k)) continue;
+      seenGroup.add(k);
+      deduped.push(c);
+    }
+
+    // 2) Retag closureKind chronologically over the deduped set.
+    //    cat-new = first appearance of (client, category) among deduped.
+    //    grp-new = the category was already sold at this store earlier.
+    const seenCat = new Set();
+    const closures = deduped.map(c => {
+      const catKey = c.clientName + '||' + c.category;
+      const isCatNew = !seenCat.has(catKey);
+      if (isCatNew) seenCat.add(catKey);
+      return Object.assign({}, c, { closureKind: isCatNew ? 'cat-new' : 'grp-new' });
+    });
+
+    return {
+      closures,
+      validCount: deduped.length,
+      groupBaselineSize: seenGroup.size,
+      categoryBaselineSize: seenCat.size,
     };
   }
 
@@ -55,7 +99,7 @@
     let lastErr = null;
     for (const url of [CLOSURES_LOCAL, CLOSURES_DIRECT]) {
       try {
-        const res = await fetch(url + '?t=' + Date.now(), { credentials: 'omit', cache: 'no-store' });
+        const res = await fetch(url, { credentials: 'omit' });
         if (!res.ok) { lastErr = new Error('HTTP ' + res.status + ' @ ' + url); continue; }
         const data = await res.json();
         return { data, source: url };
@@ -64,33 +108,68 @@
     throw lastErr || new Error('closures.json unreachable');
   }
 
+  // Backwards-compat alias.
+  async function fetchHistoricalClosures() { return fetchClosures(); }
+
   async function loadWithFallback() {
     try {
       const fetched = await fetchClosures();
-      const raw = unpackClosures(fetched.data).map(normalizeRow);
-      // Light filter: ts on or after 2026-06-01, non-zero rev, non-empty store/sku.
-      const closures = raw.filter(c =>
-        c.ts && c.ts >= C.MIN_CLOSURE_DATE && c.clientName && c.skuName
-      );
-      closures.sort((a, b) => a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0);
+      const raw = unpackClosures(fetched.data);
+      const allRows = raw.map(normalizeRow)
+        .filter(c => c.ts && c.clientName && c.skuName);
+      const derived = deriveClosures(allRows);
       return {
-        closures, source: fetched.source, sourceError: null,
-        rawCount: raw.length, dedupedCount: closures.length,
+        closures: derived.closures,
+        source: fetched.source,
+        sourceError: null,
+        rawCount: allRows.length,
+        validCount: derived.validCount,
+        dedupedCount: derived.closures.length,
+        groupBaselineSize: derived.groupBaselineSize,
+        categoryBaselineSize: derived.categoryBaselineSize,
+        fetchedAt: Date.now(),
+        isDemo: false,
         generatedAt: null, range: null,
-        fetchedAt: Date.now(), isDemo: false,
       };
     } catch (e) {
       return {
-        closures: [], source: 'error', sourceError: String(e),
-        rawCount: 0, dedupedCount: 0,
+        closures: [],
+        source: 'error',
+        sourceError: String(e),
+        rawCount: 0, validCount: 0, dedupedCount: 0,
+        groupBaselineSize: 0, categoryBaselineSize: 0,
+        fetchedAt: Date.now(),
+        isDemo: false,
         generatedAt: null, range: null,
-        fetchedAt: Date.now(), isDemo: false,
       };
     }
   }
 
+  function aggregateByCategory(closures) {
+    const buckets = {};
+    for (const c of closures) {
+      const k = c.category || 'Other';
+      const b = buckets[k] || (buckets[k] = {
+        category: k, rev: 0, units: 0, count: 0, newGroupCount: 0, newCatCount: 0
+      });
+      b.rev   += Number(c.rev) || 0;
+      b.units += Number(c.units) || 0;
+      b.count += 1;
+      if (c.closureKind === 'cat-new') b.newCatCount += 1;
+      if (c.closureKind === 'cat-new' || c.closureKind === 'grp-new') b.newGroupCount += 1;
+    }
+    return Object.values(buckets).sort((a, b) => b.rev - a.rev);
+  }
+
   window.BclApi = {
-    loadWithFallback, fetchClosures, unpackClosures, normalizeRow,
+    loadWithFallback,
+    fetchClosures,
+    fetchHistoricalClosures,
+    unpackClosures,
+    normalizeRow,
+    normalizeClosure,
+    deriveClosures,
+    aggregateByCategory,
     CLOSURES_LOCAL, CLOSURES_DIRECT,
   };
 })();
