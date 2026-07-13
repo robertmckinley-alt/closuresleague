@@ -14,8 +14,10 @@
  *      (this removes ALL weekly-top-seller repeats).
  *   3) Retag closureKind from scratch:
  *        - 'cat-new'  if this is ALSO the earliest (clientName, category) seen
- *        - 'grp-new'  if the category was already sold at that store earlier
- *   Upstream `closureKind` / `top-sku` values are ignored.
+ *        - 'top-sku'  if the category was already sold at that store earlier
+ *                     (a new SKU group inside an already-active category)
+ *   Upstream `closureKind` values (including their meaning of "top-sku" as
+ *   a weekly top-seller) are ignored — we re-derive from scratch.
  * ============================================================================ */
 (function () {
   const C = window.BclCore;
@@ -34,14 +36,35 @@
     return [];
   }
 
+  // Category overrides — patch upstream mis-categorizations.
+  // Rules run in order; first match wins.
+  const CATEGORY_OVERRIDES = [
+    // "Live Resin ___" as an infused-EDIBLE line (gummies, chocolates, caramels
+    // etc.) — upstream tags these as Concentrates because the name contains
+    // "Live Resin", but they're eaten, not dabbed.
+    { match: /live\s*resin.*(gumm|chocolat|caramel|brownie|cookie|candy|mint|hard\s*candy|lozeng|taff|choc)/i, category: 'Edibles' },
+    { match: /\bLR\s*(gumm|chocolat|caramel|brownie|cookie|candy|edible)/i, category: 'Edibles' },
+  ];
+
+  function applyCategoryOverride(rawCat, skuName, skuGroup) {
+    const src = (skuName || '') + ' | ' + (skuGroup || '');
+    for (const rule of CATEGORY_OVERRIDES) {
+      if (rule.match.test(src)) return rule.category;
+    }
+    return rawCat;
+  }
+
   function normalizeRow(r) {
     const ts = (typeof r.ts === 'string') ? r.ts.slice(0, 10) : (C && C.ymd ? C.ymd(r.ts) : '');
+    const skuName  = String(r.skuName    || r.sku    || r.product || '').trim();
+    const skuGroup = String(r.skuGroup   || r.sku_group || r.skuName || '').trim();
+    const rawCat   = String(r.category   || r.cat || 'Other').trim();
     return {
       ts,
       clientName: String(r.clientName || r.client || r.store || '').trim(),
-      skuName:    String(r.skuName    || r.sku    || r.product || '').trim(),
-      skuGroup:   String(r.skuGroup   || r.sku_group || r.skuName || '').trim(),
-      category:   String(r.category   || r.cat || 'Other').trim(),
+      skuName,
+      skuGroup,
+      category:   applyCategoryOverride(rawCat, skuName, skuGroup),
       rev:        Number(r.rev || r.revenue || 0),
       units:      Number(r.units || r.u || 0),
       sr:         String(r.sr || r.salesRep || r.rep || 'Unassigned').trim(),
@@ -55,17 +78,13 @@
   function normalizeClosure(r) { return normalizeRow(r); }
 
   // Chronological dedup + retag.
-  // Input:  array of normalized rows.
-  // Output: { closures, validCount, groupBaselineSize, categoryBaselineSize }.
   function deriveClosures(allRows) {
-    // Sort ascending by ts (skuName as tiebreaker so the result is stable).
     const sorted = allRows.slice().sort((a, b) => {
       if (a.ts !== b.ts) return a.ts < b.ts ? -1 : 1;
       return (a.skuName || '') < (b.skuName || '') ? -1 : 1;
     });
 
     // 1) Dedup by (clientName, skuGroup) — earliest wins.
-    //    This drops upstream "top-sku" weekly-winner repeats.
     const seenGroup = new Set();
     const deduped = [];
     for (const c of sorted) {
@@ -78,13 +97,14 @@
 
     // 2) Retag closureKind chronologically over the deduped set.
     //    cat-new = first appearance of (client, category) among deduped.
-    //    grp-new = the category was already sold at this store earlier.
+    //    top-sku = new SKU group inside an already-active category.
+    //    (Label preserved so UI's existing filter pills keep working.)
     const seenCat = new Set();
     const closures = deduped.map(c => {
       const catKey = c.clientName + '||' + c.category;
       const isCatNew = !seenCat.has(catKey);
       if (isCatNew) seenCat.add(catKey);
-      return Object.assign({}, c, { closureKind: isCatNew ? 'cat-new' : 'grp-new' });
+      return Object.assign({}, c, { closureKind: isCatNew ? 'cat-new' : 'top-sku' });
     });
 
     return {
@@ -108,7 +128,6 @@
     throw lastErr || new Error('closures.json unreachable');
   }
 
-  // Backwards-compat alias.
   async function fetchHistoricalClosures() { return fetchClosures(); }
 
   async function loadWithFallback() {
@@ -156,7 +175,7 @@
       b.units += Number(c.units) || 0;
       b.count += 1;
       if (c.closureKind === 'cat-new') b.newCatCount += 1;
-      if (c.closureKind === 'cat-new' || c.closureKind === 'grp-new') b.newGroupCount += 1;
+      if (c.closureKind === 'cat-new' || c.closureKind === 'top-sku') b.newGroupCount += 1;
     }
     return Object.values(buckets).sort((a, b) => b.rev - a.rev);
   }
