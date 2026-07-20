@@ -1,0 +1,222 @@
+name: Stores without PICC
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install openpyxl
+        run: pip install --quiet --break-system-packages openpyxl
+      - name: Build report
+        run: |
+          python3 <<'PY'
+          import json, urllib.request, gzip, csv, os
+          from collections import defaultdict
+
+          req = urllib.request.Request(
+              'https://api-intelligence.getbamboo.com/api/reports',
+              headers={'Accept-Encoding': 'gzip'})
+          with urllib.request.urlopen(req, timeout=90) as r:
+              raw = r.read()
+              if r.headers.get('Content-Encoding') == 'gzip':
+                  raw = gzip.decompress(raw)
+              d = json.loads(raw)
+
+          def colidx(dim, name):
+              cols = dim.get('columns', []) if isinstance(dim, dict) else []
+              return cols.index(name) if name in cols else -1
+
+          dims = d['dimensions']
+          cli   = dims['clients']
+          prod  = dims['products']
+          brand = dims.get('brands', {'rows':[],'columns':['id','name']})
+
+          ci_name  = colidx(cli, 'name')
+          ci_sr    = colidx(cli, 'sales_rep')
+          ci_vr    = colidx(cli, 'vmi_rep')
+          ci_city  = colidx(cli, 'city')
+          ci_state = colidx(cli, 'state')
+          ci_tags  = colidx(cli, 'tags')
+          ci_active = colidx(cli, 'active')
+
+          pi_name  = colidx(prod, 'name')
+          pi_brand = colidx(prod, 'brand_idx')
+
+          bi_name = colidx(brand, 'name')
+
+          # Find PICC brand idxes
+          picc_brand_idxes = set()
+          for i, r in enumerate(brand.get('rows', [])):
+              if not r: continue
+              n = (r[bi_name] or '').lower()
+              if 'picc' == n or n.startswith('picc') or ' picc' in n:
+                  picc_brand_idxes.add(i)
+          print('PICC brand idxes:', picc_brand_idxes,
+                'names:', [brand['rows'][i][bi_name] for i in picc_brand_idxes])
+
+          # Find PICC product idxes
+          picc_prod_idxes = set()
+          for i, r in enumerate(prod['rows']):
+              if not r: continue
+              bidx = r[pi_brand] if pi_brand >= 0 and len(r) > pi_brand else None
+              if bidx in picc_brand_idxes:
+                  picc_prod_idxes.add(i)
+              else:
+                  pname = (r[pi_name] or '')
+                  if ' PICC' in pname or 'PICC ' in pname or pname.startswith('PICC'):
+                      picc_prod_idxes.add(i)
+          print('PICC product count:', len(picc_prod_idxes))
+
+          cps = d['facts']['client_product_sales']
+          rows_col = cps['row']; cols_col = cps['col']
+          revs = cps.get('revenue_cents', [])
+          picc_client_idxes = set()
+          picc_client_spend = defaultdict(float)
+          for i in range(len(rows_col)):
+              pi = cols_col[i]
+              if pi in picc_prod_idxes:
+                  ci = rows_col[i]
+                  picc_client_idxes.add(ci)
+                  picc_client_spend[ci] += (revs[i] or 0) / 100.0
+
+          non_picc = []
+          picc = []
+          for i, r in enumerate(cli['rows']):
+              if not r: continue
+              name = r[ci_name] or ''
+              if not name: continue
+              if ci_active >= 0 and len(r) > ci_active and r[ci_active] is False:
+                  continue
+              row = {
+                  'name': name,
+                  'sales_rep': r[ci_sr] if ci_sr >= 0 and len(r) > ci_sr else '',
+                  'vmi_rep':   r[ci_vr] if ci_vr >= 0 and len(r) > ci_vr else '',
+                  'city':      r[ci_city] if ci_city >= 0 and len(r) > ci_city else '',
+                  'state':     r[ci_state] if ci_state >= 0 and len(r) > ci_state else '',
+                  'tags':      ','.join(r[ci_tags]) if ci_tags >= 0 and len(r) > ci_tags and isinstance(r[ci_tags], list) else '',
+              }
+              if i in picc_client_idxes:
+                  row['picc_ytd_spend'] = round(picc_client_spend[i], 2)
+                  picc.append(row)
+              else:
+                  non_picc.append(row)
+
+          os.makedirs('data', exist_ok=True)
+
+          with open('data/stores-without-picc.csv', 'w', newline='') as f:
+              w = csv.writer(f)
+              w.writerow(['Store','Sales Rep','VMI Rep','City','State','Tags'])
+              for r in sorted(non_picc, key=lambda x: (x['sales_rep'] or '', x['name'])):
+                  w.writerow([r['name'], r['sales_rep'], r['vmi_rep'], r['city'], r['state'], r['tags']])
+
+          with open('data/stores-with-picc.csv', 'w', newline='') as f:
+              w = csv.writer(f)
+              w.writerow(['Store','Sales Rep','VMI Rep','City','State','Tags','PICC YTD Spend'])
+              for r in sorted(picc, key=lambda x: -x['picc_ytd_spend']):
+                  w.writerow([r['name'], r['sales_rep'], r['vmi_rep'], r['city'], r['state'], r['tags'], r['picc_ytd_spend']])
+
+          from openpyxl import Workbook
+          from openpyxl.styles import Font, PatternFill, Alignment
+
+          wb = Workbook()
+          ws = wb.active
+          ws.title = 'Summary'
+          ws['A1'] = 'PICC placement gap analysis'
+          ws['A1'].font = Font(size=18, bold=True, color='FFFFFF')
+          ws['A1'].fill = PatternFill('solid', fgColor='b45309')
+          ws['A1'].alignment = Alignment(horizontal='center', vertical='center')
+          ws.merge_cells('A1:C1')
+          ws.row_dimensions[1].height = 32
+
+          rows_a = [
+              ('API generated_at', d.get('generated_at','')),
+              ('API range', json.dumps(d.get('range'))),
+              ('', ''),
+              ('Total active stores', len(non_picc) + len(picc)),
+              ('Stores WITH PICC purchases', len(picc)),
+              ('Stores WITHOUT PICC (target list)', len(non_picc)),
+              ('PICC penetration', f"{100.0*len(picc)/max(1,len(non_picc)+len(picc)):.1f}%"),
+              ('', ''),
+              ('Total PICC YTD revenue', round(sum(picc_client_spend.values()), 2)),
+              ('Avg PICC spend per active store', round(sum(picc_client_spend.values())/max(1,len(picc)), 2)),
+          ]
+          for i, (k, v) in enumerate(rows_a, start=3):
+              ws.cell(row=i, column=1, value=k).font = Font(bold=True)
+              c = ws.cell(row=i, column=2, value=v)
+              if 'revenue' in k.lower() or 'spend' in k.lower():
+                  try: c.number_format = '$#,##0.00'
+                  except: pass
+          ws.column_dimensions['A'].width = 34
+          ws.column_dimensions['B'].width = 40
+
+          ws = wb.create_sheet('Stores Without PICC')
+          heads = ['Store','Sales Rep','VMI Rep','City','State','Tags']
+          for c, h in enumerate(heads, 1):
+              cell = ws.cell(row=1, column=c, value=h)
+              cell.font = Font(bold=True, color='FFFFFF')
+              cell.fill = PatternFill('solid', fgColor='b45309')
+              cell.alignment = Alignment(horizontal='center')
+          row_n = 2
+          for r in sorted(non_picc, key=lambda x: (x['sales_rep'] or '', x['name'])):
+              ws.cell(row=row_n, column=1, value=r['name'])
+              ws.cell(row=row_n, column=2, value=r['sales_rep'])
+              ws.cell(row=row_n, column=3, value=r['vmi_rep'])
+              ws.cell(row=row_n, column=4, value=r['city'])
+              ws.cell(row=row_n, column=5, value=r['state'])
+              ws.cell(row=row_n, column=6, value=r['tags'])
+              row_n += 1
+          ws.freeze_panes = 'A2'
+          ws.column_dimensions['A'].width = 40
+          ws.column_dimensions['B'].width = 20
+          ws.column_dimensions['C'].width = 20
+          ws.column_dimensions['D'].width = 20
+          ws.column_dimensions['E'].width = 8
+          ws.column_dimensions['F'].width = 30
+
+          ws = wb.create_sheet('Stores With PICC')
+          heads = ['Store','Sales Rep','VMI Rep','City','State','Tags','PICC YTD Spend']
+          for c, h in enumerate(heads, 1):
+              cell = ws.cell(row=1, column=c, value=h)
+              cell.font = Font(bold=True, color='FFFFFF')
+              cell.fill = PatternFill('solid', fgColor='047857')
+              cell.alignment = Alignment(horizontal='center')
+          row_n = 2
+          for r in sorted(picc, key=lambda x: -x['picc_ytd_spend']):
+              ws.cell(row=row_n, column=1, value=r['name'])
+              ws.cell(row=row_n, column=2, value=r['sales_rep'])
+              ws.cell(row=row_n, column=3, value=r['vmi_rep'])
+              ws.cell(row=row_n, column=4, value=r['city'])
+              ws.cell(row=row_n, column=5, value=r['state'])
+              ws.cell(row=row_n, column=6, value=r['tags'])
+              ws.cell(row=row_n, column=7, value=r['picc_ytd_spend']).number_format = '$#,##0.00'
+              row_n += 1
+          ws.freeze_panes = 'A2'
+          ws.column_dimensions['A'].width = 40
+          ws.column_dimensions['B'].width = 20
+          ws.column_dimensions['C'].width = 20
+          ws.column_dimensions['D'].width = 20
+          ws.column_dimensions['E'].width = 8
+          ws.column_dimensions['F'].width = 30
+          ws.column_dimensions['G'].width = 16
+
+          wb.save('data/stores-picc-report.xlsx')
+
+          print('DONE')
+          print('  Stores WITH PICC:', len(picc))
+          print('  Stores WITHOUT PICC:', len(non_picc))
+          for f in ('data/stores-without-picc.csv','data/stores-with-picc.csv','data/stores-picc-report.xlsx'):
+              print(' ', f, os.path.getsize(f), 'bytes')
+          PY
+          ls -la data/stores-*
+      - name: Commit
+        run: |
+          git config user.name  "picc-report-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add data/stores-without-picc.csv data/stores-with-picc.csv data/stores-picc-report.xlsx
+          if git diff --cached --quiet; then echo "no changes"; else git commit -m "Stores without PICC report" && git push; fi
