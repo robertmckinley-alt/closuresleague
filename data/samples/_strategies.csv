@@ -1,0 +1,5 @@
+Strategy,SKU Count,Units/SKU,Total,PDF Filename
+Strategy A REVENUE,5,17,437.07,data/samples/Strategy_A_REVENUE_Greenlight.pdf
+Strategy B BALANCED TYPE,5,17,508.13,data/samples/Strategy_B_BALANCED_TYPE_Greenlight.pdf
+Strategy C PRICE LADDER,5,17,532.44,data/samples/Strategy_C_PRICE_LADDER_Greenlight.pdf
+Strategy D WIDE ASSORTMENT,10,10,458.0,data/samples/Strategy_D_WIDE_ASSORTMENT_Greenlight.pdf
