@@ -173,9 +173,14 @@ jobs:
                   w.writerow([s['name'], round(s['spend'],2), s['units'], s['ups'], round(total,2), fn])
           print('done. wrote', len(ranked), 'PDFs')
           PYEOF
+
+      - name: Package ZIP
+        run: |
+          cd data && zip -qr PICC_Proposals.zip proposals/
+          ls -la PICC_Proposals.zip
       - name: Commit
         run: |
           git config user.name picc-bot
           git config user.email actions@users.noreply.github.com
-          git add data/proposals
+          git add data/proposals data/PICC_Proposals.zip
           if git diff --cached --quiet; then echo none; else git commit -m 'PICC proposals — Strategy D (10 SKUs, scaled units)' && git push; fi
