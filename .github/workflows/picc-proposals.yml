@@ -1,4 +1,4 @@
-name: PICC sample strategies
+name: PICC proposals
 
 on:
   workflow_dispatch:
@@ -46,32 +46,38 @@ jobs:
           pi_brand = colidx(prod, 'brand_idx')
           bi_name = colidx(brand, 'name')
 
-          picc_bi = set()
+          PANDA_KW = ['panda','dabstract','snickle','micro bar','microbar','hot shotz','hotshotz','hot sugar','cake house','kandy shoppe','bangers','firecracker','eluzion','juice box']
+          picc_bi = set(); panda_bi = set()
           for i, r in enumerate(brand['rows']):
               if not r: continue
               n = (r[bi_name] or '').lower()
               if 'picc' == n or n.startswith('picc'): picc_bi.add(i)
+              elif any(k in n for k in PANDA_KW): panda_bi.add(i)
 
-          picc_pi = set()
+          picc_pi = set(); panda_pi = set()
           for i, r in enumerate(prod['rows']):
               if not r: continue
               bi = r[pi_brand] if pi_brand >= 0 and len(r) > pi_brand else None
               pn = (r[pi_name] or '')
               if bi in picc_bi or ' PICC' in pn or 'PICC ' in pn or pn.startswith('PICC') or 'DOH' in pn:
                   picc_pi.add(i)
+              elif bi in panda_bi:
+                  panda_pi.add(i)
 
           cps = d['facts']['client_product_sales']
           rows_col, cols_col = cps['row'], cps['col']
           revs = cps.get('revenue_cents', [])
           units = cps.get('units', [])
 
-          picc_agg = defaultdict(lambda: {'u':0,'r':0.0,'stores':set()})
+          panda_spend = defaultdict(float); panda_units = defaultdict(int)
+          picc_agg = defaultdict(lambda: {'u':0,'r':0.0})
           for i in range(len(rows_col)):
-              pi = cols_col[i]
+              pi = cols_col[i]; ci = rows_col[i]
+              rev = (revs[i] or 0)/100.0; u = units[i] or 0
               if pi in picc_pi:
-                  picc_agg[pi]['u'] += units[i] or 0
-                  picc_agg[pi]['r'] += (revs[i] or 0)/100.0
-                  picc_agg[pi]['stores'].add(rows_col[i])
+                  picc_agg[pi]['u'] += u; picc_agg[pi]['r'] += rev
+              elif pi in panda_pi:
+                  panda_spend[ci] += rev; panda_units[ci] += u
 
           catalog = []
           for pi, s in picc_agg.items():
@@ -85,29 +91,28 @@ jobs:
               fmt = 'single'
               if '5pk' in pname: fmt = '5pk'
               elif '2pk' in pname: fmt = '2pk'
-              catalog.append({'name': pname, 'price': price, 'units': s['u'], 'rev': s['r'], 'type': t, 'fmt': fmt, 'stores': len(s['stores'])})
-
+              catalog.append({'name': pname, 'price': price, 'type': t, 'fmt': fmt, 'rev': s['r']})
           catalog.sort(key=lambda x: -x['rev'])
-          A = catalog[:5]; A_ups = 17
-          by_type = {'I':[],'S':[],'H':[]}
-          for c in catalog: by_type[c['type']].append(c)
-          B = []
-          if by_type['I']: B.append(by_type['I'][0])
-          if by_type['S']: B.append(by_type['S'][0])
-          if by_type['H']: B.append(by_type['H'][0])
-          used = {c['name'] for c in B}
-          for c in catalog:
-              if len(B) >= 5: break
-              if c['name'] not in used: B.append(c)
-          B_ups = 17
-          by_price = sorted([c for c in catalog if c['stores'] >= 3], key=lambda x: x['price'])
-          if len(by_price) >= 5:
-              idxs = [0, len(by_price)//4, len(by_price)//2, 3*len(by_price)//4, len(by_price)-1]
-              C = [by_price[i] for i in idxs]
-          else:
-              C = by_price[:5]
-          C_ups = 17
-          D = catalog[:10]; D_ups = 10
+          TOP10 = catalog[:10]
+          print('Top 10 PICC by rev:')
+          for c in TOP10: print(' ', c['price'], '[', c['type'], '/', c['fmt'], ']', c['name'])
+
+          targets = []
+          with open('data/stores-without-picc.csv') as f:
+              reader = csv.reader(f); next(reader, None)
+              for row in reader:
+                  if row and row[0]: targets.append(row[0])
+
+          name2i = {(r[ci_name] or '').strip(): i for i, r in enumerate(cli['rows']) if r and r[ci_name]}
+          ranked = [{'name': n, 'spend': panda_spend.get(name2i.get(n), 0.0), 'units': panda_units.get(name2i.get(n), 0)} for n in targets]
+          ranked.sort(key=lambda x: -x['spend'])
+          N = max(1, len(ranked))
+          for rk, s in enumerate(ranked):
+              if s['spend'] <= 0:
+                  s['ups'] = 10
+              else:
+                  frac = 1.0 - (rk / max(1, N-1))
+                  s['ups'] = max(10, min(20, int(round(10 + 10*frac))))
 
           from reportlab.lib.pagesizes import letter
           from reportlab.lib import colors
@@ -120,13 +125,14 @@ jobs:
           PP_LOGO = 'data/assets/pp-logo.png' if os.path.exists('data/assets/pp-logo.png') else None
           PICC_LOGO = 'data/assets/picc-logo.jpg' if os.path.exists('data/assets/picc-logo.jpg') else None
 
-          def build(store_name, strategy_label, strategy_desc, picks, ups, path):
+          def san(n): return re.sub(r'[<>:"/\\|?*]', '_', n).strip()[:100]
+
+          def build(store, path):
               doc = SimpleDocTemplate(path, pagesize=letter, leftMargin=0.6*inch, rightMargin=0.6*inch, topMargin=0.4*inch, bottomMargin=0.6*inch)
               ss = getSampleStyleSheet()
               ss.add(ParagraphStyle(name='Brand', fontName='Helvetica-Bold', fontSize=20, textColor=colors.white, alignment=TA_CENTER, leading=24))
               ss.add(ParagraphStyle(name='Sub', fontName='Helvetica', fontSize=12, textColor=colors.HexColor('#e5e7eb'), alignment=TA_CENTER, leading=14))
               ss.add(ParagraphStyle(name='H1', fontName='Helvetica-Bold', fontSize=15, textColor=colors.black, leading=18))
-              ss.add(ParagraphStyle(name='H2', fontName='Helvetica-Bold', fontSize=12, textColor=colors.HexColor('#b45309'), leading=15))
               ss.add(ParagraphStyle(name='Meta', fontName='Helvetica', fontSize=10, textColor=colors.HexColor('#374151'), leading=13))
               ss.add(ParagraphStyle(name='Note', fontName='Helvetica-Oblique', fontSize=9, textColor=colors.HexColor('#4b5563'), leading=12))
               story = []
@@ -136,23 +142,21 @@ jobs:
               banner = Table([[pp_img, center, picc_img]], colWidths=[1.8*inch, 4.3*inch, 1.1*inch], rowHeights=[1.1*inch])
               banner.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1),colors.black),('VALIGN',(0,0),(-1,-1),'MIDDLE'),('ALIGN',(0,0),(-1,-1),'CENTER'),('LEFTPADDING',(0,0),(-1,-1),12),('RIGHTPADDING',(0,0),(-1,-1),12)]))
               story.append(banner); story.append(Spacer(1, 0.15*inch))
-              mrows = [['Store:', Paragraph('<b>'+store_name+'</b>', ss['H1'])],
-                       ['Date:', date.today().isoformat()],
-                       ['Prepared by:', 'Phat Panda Wholesale'],
-                       ['Strategy:', Paragraph('<b>'+strategy_label+'</b> &nbsp; '+strategy_desc, ss['H2'])]]
-              tm = Table(mrows, colWidths=[1.6*inch, 5.4*inch]); tm.setStyle(TableStyle([('FONTNAME',(0,0),(0,-1),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),10),('BOTTOMPADDING',(0,0),(-1,-1),3)]))
+              ups = store['ups']
+              mrows = [['Store:', Paragraph('<b>'+store['name']+'</b>', ss['H1'])], ['Date:', date.today().isoformat()], ['Prepared by:', 'Phat Panda Wholesale'], ['Recommended units per SKU:', str(ups)]]
+              tm = Table(mrows, colWidths=[2.0*inch, 5.0*inch]); tm.setStyle(TableStyle([('FONTNAME',(0,0),(0,-1),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),10),('BOTTOMPADDING',(0,0),(-1,-1),4)]))
               story.append(tm); story.append(Spacer(1, 0.15*inch))
               story.append(Paragraph('Proposed PICC Assortment', ss['H1'])); story.append(Spacer(1, 0.06*inch))
               body = [['#', 'Type', 'SKU / Description', 'Unit Price', 'Units', 'Line Total']]
               total = 0.0
-              for k, sku in enumerate(picks, 1):
+              for k, sku in enumerate(TOP10, 1):
                   line = sku['price']*ups; total += line
                   body.append([str(k), sku['type']+'/'+sku['fmt'], sku['name'], '\$'+format(sku['price'],'.2f'), str(ups), '\$'+format(line,',.2f')])
               body.append(['', '', '', '', 'TOTAL', '\$'+format(total,',.2f')])
               t = Table(body, colWidths=[0.3*inch, 0.7*inch, 3.3*inch, 0.85*inch, 0.6*inch, 1.15*inch])
               t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),GREEN),('TEXTCOLOR',(0,0),(-1,0),colors.white),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),8.5),('ALIGN',(3,0),(-1,-1),'RIGHT'),('ALIGN',(0,0),(1,-1),'CENTER'),('VALIGN',(0,0),(-1,-1),'MIDDLE'),('GRID',(0,0),(-1,-1),0.4,colors.HexColor('#e5e7eb')),('BACKGROUND',(0,-1),(-1,-1),colors.HexColor('#f3f4f6')),('FONTNAME',(4,-1),(-1,-1),'Helvetica-Bold')]))
               story.append(t); story.append(Spacer(1, 0.20*inch))
-              n1 = 'PICC is a Phat Panda partner brand of premium infused prerolls. This proposal recommends <b>'+str(ups)+' units per SKU</b> across <b>'+str(len(picks))+' SKUs</b>, targeting a launch order in the <b>\$500–\$1,000</b> range.'
+              n1 = 'PICC is a Phat Panda partner brand of premium infused prerolls. This proposal recommends <b>10 SKUs</b> spanning our top-performing statewide lineup at <b>'+str(ups)+' units per SKU</b>, sized to your existing category volume.'
               story.append(Paragraph(n1, ss['Meta'])); story.append(Spacer(1, 0.10*inch))
               story.append(Paragraph('Terms: Net-30, freight included, MOQ waived on initial PICC placement.', ss['Note']))
               story.append(Spacer(1, 0.35*inch))
@@ -160,29 +164,18 @@ jobs:
               doc.build(story)
               return total
 
-          os.makedirs('data/samples', exist_ok=True)
-          summary = []
-          STORE = 'Greenlight - VMI - 1WT'
-          for label, desc, picks, ups in [
-              ('Strategy A REVENUE', 'Top 5 SKUs by statewide YTD revenue', A, A_ups),
-              ('Strategy B BALANCED TYPE', 'Top indica + sativa + hybrid + 2 top-rev wildcards', B, B_ups),
-              ('Strategy C PRICE LADDER', '5 SKUs spanning cheapest to premium', C, C_ups),
-              ('Strategy D WIDE ASSORTMENT', 'Top 10 SKUs by revenue at 10 units/SKU', D, D_ups),
-          ]:
-              slug = re.sub(r'[^a-zA-Z0-9]+', '_', label).strip('_')
-              path = f'data/samples/{slug}_Greenlight.pdf'
-              total = build(STORE, label, desc, picks, ups, path)
-              summary.append((label, len(picks), ups, round(total,2), path))
-              print(f'WROTE {slug}: {len(picks)} SKUs x {ups} u/sku = TOTAL {total:.2f}')
-
-          with open('data/samples/_strategies.csv', 'w', newline='') as f:
-              w = csv.writer(f); w.writerow(['Strategy','SKU Count','Units/SKU','Total','PDF Filename'])
-              for row in summary: w.writerow(row)
-          print('done')
+          os.makedirs('data/proposals', exist_ok=True)
+          with open('data/proposals/_manifest.csv', 'w', newline='') as mf:
+              w = csv.writer(mf); w.writerow(['Store','Panda YTD Spend','Panda Units','Units/SKU','Proposal Total','PDF Filename'])
+              for s in ranked:
+                  fn = san(s['name']) + ' PICC Proposal.pdf'
+                  total = build(s, os.path.join('data/proposals', fn))
+                  w.writerow([s['name'], round(s['spend'],2), s['units'], s['ups'], round(total,2), fn])
+          print('done. wrote', len(ranked), 'PDFs')
           PYEOF
       - name: Commit
         run: |
           git config user.name picc-bot
           git config user.email actions@users.noreply.github.com
-          git add data/samples
-          if git diff --cached --quiet; then echo none; else git commit -m 'Sample PICC strategy PDFs' && git push; fi
+          git add data/proposals
+          if git diff --cached --quiet; then echo none; else git commit -m 'PICC proposals — Strategy D (10 SKUs, scaled units)' && git push; fi
