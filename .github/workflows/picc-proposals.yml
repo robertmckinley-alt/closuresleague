@@ -18,7 +18,7 @@ jobs:
       - name: Fetch logos
         run: |
           mkdir -p data/assets
-          curl -sSL 'https://phatpanda.com/assets/img/logos/PP-BlackGreen-Square.svg' -o data/assets/pp-logo.svg || true
+          curl -sSL 'https://phatpanda.com/assets/img/logos/PP-WhiteGreen-Wide.svg' -o data/assets/pp-logo.svg || true
           curl -sSL 'https://pbs.twimg.com/profile_images/1626366170348802048/DfqvI1N5_400x400.jpg' -o data/assets/picc-logo.jpg || true
           python3 -c "import cairosvg; cairosvg.svg2png(url='data/assets/pp-logo.svg', write_to='data/assets/pp-logo.png', output_width=400)" || echo "svg->png failed"
           ls -la data/assets/
@@ -128,11 +128,11 @@ jobs:
               ss.add(ParagraphStyle(name='Note', fontName='Helvetica-Oblique', fontSize=9, textColor=colors.HexColor('#4b5563'), leading=12))
               story = []
           
-              pp_img = Image(PP_LOGO, width=0.9*inch, height=0.9*inch) if PP_LOGO else Paragraph('<font color="white"><b>PHAT PANDA</b></font>', ss['Brand'])
+              pp_img = Image(PP_LOGO, width=1.6*inch, height=0.55*inch) if PP_LOGO else Paragraph('<font color="white"><b>PHAT PANDA</b></font>', ss['Brand'])
               picc_img = Image(PICC_LOGO, width=0.9*inch, height=0.9*inch) if PICC_LOGO else Paragraph('<font color="white"><b>PICC</b></font>', ss['Brand'])
               center = [Paragraph('<b>PHAT PANDA</b> &times; <b>PICC</b>', ss['Brand']), Paragraph('ORDER PROPOSAL', ss['Sub'])]
               from reportlab.platypus import KeepInFrame
-              banner = Table([[pp_img, center, picc_img]], colWidths=[1.2*inch, 4.9*inch, 1.2*inch], rowHeights=[1.1*inch])
+              banner = Table([[pp_img, center, picc_img]], colWidths=[1.8*inch, 4.3*inch, 1.1*inch], rowHeights=[1.1*inch])
               banner.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1),colors.black),('VALIGN',(0,0),(-1,-1),'MIDDLE'),('ALIGN',(0,0),(-1,-1),'CENTER'),('LEFTPADDING',(0,0),(-1,-1),12),('RIGHTPADDING',(0,0),(-1,-1),12)]))
               story.append(banner); story.append(Spacer(1, 0.25*inch))
           
