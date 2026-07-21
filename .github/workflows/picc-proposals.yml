@@ -1,0 +1,163 @@
+name: PICC proposals
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  gen:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install deps
+        run: pip install --quiet --break-system-packages reportlab
+      - name: Build
+        run: |
+          python3 <<PYEOF
+
+import json, urllib.request, gzip, os, sys, re, csv
+from collections import defaultdict
+from datetime import date
+
+req = urllib.request.Request('https://api-intelligence.getbamboo.com/api/reports', headers={'Accept-Encoding':'gzip'})
+with urllib.request.urlopen(req, timeout=90) as r:
+    raw = r.read()
+    if r.headers.get('Content-Encoding') == 'gzip': raw = gzip.decompress(raw)
+    d = json.loads(raw)
+
+def colidx(dim, name):
+    cols = dim.get('columns', []) if isinstance(dim, dict) else []
+    return cols.index(name) if name in cols else -1
+
+dims = d['dimensions']
+cli, prod = dims['clients'], dims['products']
+brand = dims.get('brands', {'rows':[],'columns':['id','name']})
+ci_name = colidx(cli, 'name')
+pi_name = colidx(prod, 'name')
+pi_brand = colidx(prod, 'brand_idx')
+bi_name = colidx(brand, 'name')
+
+PANDA_KW = ['panda','dabstract','snickle','micro bar','microbar','hot shotz','hotshotz','hot sugar','cake house','kandy shoppe','bangers','firecracker','eluzion','juice box']
+
+picc_bi = set(); panda_bi = set()
+for i, r in enumerate(brand['rows']):
+    if not r: continue
+    n = (r[bi_name] or '').lower()
+    if 'picc' == n or n.startswith('picc'): picc_bi.add(i)
+    elif any(k in n for k in PANDA_KW): panda_bi.add(i)
+
+picc_pi = set(); panda_pi = set()
+for i, r in enumerate(prod['rows']):
+    if not r: continue
+    bi = r[pi_brand] if pi_brand >= 0 and len(r) > pi_brand else None
+    pn = (r[pi_name] or '')
+    if bi in picc_bi or ' PICC' in pn or 'PICC ' in pn or pn.startswith('PICC') or 'DOH' in pn:
+        picc_pi.add(i)
+    elif bi in panda_bi:
+        panda_pi.add(i)
+
+print('PICC prods:', len(picc_pi), 'Panda prods:', len(panda_pi))
+
+cps = d['facts']['client_product_sales']
+rows_col, cols_col = cps['row'], cps['col']
+revs = cps.get('revenue_cents', [])
+units = cps.get('units', [])
+
+panda_spend = defaultdict(float); panda_units = defaultdict(int)
+picc_agg = defaultdict(lambda: {'u':0,'r':0.0})
+for i in range(len(rows_col)):
+    pi = cols_col[i]; ci = rows_col[i]
+    rev = (revs[i] or 0)/100.0; u = units[i] or 0
+    if pi in picc_pi:
+        picc_agg[pi]['u'] += u; picc_agg[pi]['r'] += rev
+    elif pi in panda_pi:
+        panda_spend[ci] += rev; panda_units[ci] += u
+
+catalog = []
+for pi, s in picc_agg.items():
+    if s['u'] == 0: continue
+    catalog.append({'name': prod['rows'][pi][pi_name], 'price': round(s['r']/s['u'],2), 'rev': s['r']})
+catalog.sort(key=lambda x: -x['rev'])
+top5 = catalog[:5]
+print('Top 5 PICC:'); [print(f" " + repr(x)) for x in top5]
+
+targets = []
+with open('data/stores-without-picc.csv') as f:
+    reader = csv.reader(f); next(reader, None)
+    for row in reader:
+        if row and row[0]: targets.append(row[0])
+print('targets:', len(targets))
+
+name2i = {(r[ci_name] or '').strip(): i for i, r in enumerate(cli['rows']) if r and r[ci_name]}
+ranked = [{'name': n, 'spend': panda_spend.get(name2i.get(n), 0.0), 'units': panda_units.get(name2i.get(n), 0)} for n in targets]
+ranked.sort(key=lambda x: -x['spend'])
+N = max(1, len(ranked))
+for rk, s in enumerate(ranked):
+    if s['spend'] <= 0:
+        s['ups'] = 10
+    else:
+        frac = 1.0 - (rk / max(1, N-1))
+        s['ups'] = max(10, min(20, int(round(10 + 10*frac))))
+
+from reportlab.lib.pagesizes import letter
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.enums import TA_CENTER
+
+GREEN = colors.HexColor('#72BC44')
+def san(n): return re.sub(r'[<>:"/\\|?*]', '_', n).strip()[:100]
+
+def build(store, path):
+    doc = SimpleDocTemplate(path, pagesize=letter, leftMargin=0.6*inch, rightMargin=0.6*inch, topMargin=0.4*inch, bottomMargin=0.6*inch)
+    ss = getSampleStyleSheet()
+    ss.add(ParagraphStyle(name='Brand', fontName='Helvetica-Bold', fontSize=22, textColor=colors.white, alignment=TA_CENTER, leading=26))
+    ss.add(ParagraphStyle(name='Sub', fontName='Helvetica', fontSize=11, textColor=colors.white, alignment=TA_CENTER, leading=14))
+    ss.add(ParagraphStyle(name='H1', fontName='Helvetica-Bold', fontSize=15, textColor=colors.black, leading=18))
+    ss.add(ParagraphStyle(name='Meta', fontName='Helvetica', fontSize=10, textColor=colors.HexColor('#374151'), leading=13))
+    ss.add(ParagraphStyle(name='Note', fontName='Helvetica-Oblique', fontSize=9, textColor=colors.HexColor('#4b5563'), leading=12))
+    story = []
+    b = Table([[Paragraph('<b>PHAT PANDA</b> &nbsp; &times; &nbsp; <b>PICC</b>', ss['Brand']), Paragraph('ORDER PROPOSAL', ss['Sub'])]], colWidths=[4.7*inch, 2.5*inch], rowHeights=[1.0*inch])
+    b.setStyle(TableStyle([('BACKGROUND',(0,0),(0,0),colors.black),('BACKGROUND',(1,0),(1,0),GREEN),('VALIGN',(0,0),(-1,-1),'MIDDLE'),('LEFTPADDING',(0,0),(-1,-1),20),('RIGHTPADDING',(0,0),(-1,-1),20)]))
+    story.append(b); story.append(Spacer(1, 0.25*inch))
+    ups = store['ups']
+    mrows = [['Store:', Paragraph('<b>'+store['name']+'</b>', ss['H1'])], ['Date:', date.today().isoformat()], ['Prepared by:', 'Phat Panda Wholesale'], ['Panda YTD spend:', '$'+format(store['spend'],',.2f')+'  ('+format(store['units'],',')+' units)'], ['Units per SKU:', str(ups)]]
+    tm = Table(mrows, colWidths=[2.0*inch, 5.0*inch]); tm.setStyle(TableStyle([('FONTNAME',(0,0),(0,-1),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),10),('BOTTOMPADDING',(0,0),(-1,-1),4)]))
+    story.append(tm); story.append(Spacer(1, 0.25*inch))
+    story.append(Paragraph('Proposed PICC Assortment', ss['H1'])); story.append(Spacer(1, 0.10*inch))
+    body = [['#', 'SKU / Description', 'Unit Price', 'Units', 'Line Total']]
+    total = 0.0
+    for k, sku in enumerate(top5, 1):
+        line = sku['price']*ups; total += line
+        body.append([str(k), sku['name'], '$'+format(sku['price'],'.2f'), str(ups), '$'+format(line,',.2f')])
+    body.append(['', '', '', 'TOTAL', '$'+format(total,',.2f')])
+    t = Table(body, colWidths=[0.4*inch, 3.9*inch, 0.9*inch, 0.7*inch, 1.3*inch])
+    t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),GREEN),('TEXTCOLOR',(0,0),(-1,0),colors.white),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),9),('ALIGN',(2,0),(-1,-1),'RIGHT'),('ALIGN',(0,0),(0,-1),'CENTER'),('VALIGN',(0,0),(-1,-1),'MIDDLE'),('GRID',(0,0),(-1,-1),0.4,colors.HexColor('#e5e7eb')),('BACKGROUND',(0,-1),(-1,-1),colors.HexColor('#f3f4f6')),('FONTNAME',(3,-1),(-1,-1),'Helvetica-Bold')]))
+    story.append(t); story.append(Spacer(1, 0.30*inch))
+    n1 = 'PICC is the newest addition to the Phat Panda house of brands - premium infused prerolls in DOH packs. This proposal sizes the launch order at <b>'+str(ups)+' units per SKU</b>, calibrated to your Panda-family purchase history over the past year.'
+    story.append(Paragraph(n1, ss['Meta'])); story.append(Spacer(1, 0.10*inch))
+    story.append(Paragraph('Terms: Net-30, freight included, MOQ waived on initial PICC placement.', ss['Note']))
+    story.append(Spacer(1, 0.35*inch))
+    story.append(Paragraph('Approved by ______________________________________  Date __________________', ss['Meta']))
+    doc.build(story)
+
+os.makedirs('data/proposals', exist_ok=True)
+with open('data/proposals/_manifest.csv', 'w', newline='') as mf:
+    w = csv.writer(mf); w.writerow(['Store','Panda YTD Spend','Panda Units','Units/SKU','Proposal Total','PDF Filename'])
+    for s in ranked:
+        fn = san(s['name']) + ' PICC Proposal.pdf'
+        build(s, os.path.join('data/proposals', fn))
+        tot = sum(sku['price'] for sku in top5) * s['ups']
+        w.writerow([s['name'], round(s['spend'],2), s['units'], s['ups'], round(tot,2), fn])
+print('done. wrote', len(ranked), 'PDFs')
+
+PYEOF
+      - name: Commit
+        run: |
+          git config user.name picc-bot
+          git config user.email actions@users.noreply.github.com
+          git add data/proposals
+          if git diff --cached --quiet; then echo none; else git commit -m "PICC proposal PDFs" && git push; fi
