@@ -152,13 +152,13 @@ jobs:
               for k, sku in enumerate(TOP10, 1):
                   line = sku['price']*ups; total += line
                   body.append([str(k), sku['type']+'/'+sku['fmt'], sku['name'], '\$'+format(sku['price'],'.2f'), str(ups), '\$'+format(line,',.2f')])
-              body.append(['', '', '', '', 'TOTAL', '\$'+format(total,',.2f')])
+              body.append(['', '', '', '', 'Subtotal', '\$'+format(total,',.2f')]); disc = round(total*0.10,2); net = round(total-disc,2); body.append(['','','','','-10% launch discount','-\$'+format(disc,',.2f')]); body.append(['','','','','TOTAL','\$'+format(net,',.2f')])
               t = Table(body, colWidths=[0.3*inch, 0.7*inch, 3.3*inch, 0.85*inch, 0.6*inch, 1.15*inch])
               t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),GREEN),('TEXTCOLOR',(0,0),(-1,0),colors.white),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),8.5),('ALIGN',(3,0),(-1,-1),'RIGHT'),('ALIGN',(0,0),(1,-1),'CENTER'),('VALIGN',(0,0),(-1,-1),'MIDDLE'),('GRID',(0,0),(-1,-1),0.4,colors.HexColor('#e5e7eb')),('BACKGROUND',(0,-1),(-1,-1),colors.HexColor('#f3f4f6')),('FONTNAME',(4,-1),(-1,-1),'Helvetica-Bold')]))
               story.append(t); story.append(Spacer(1, 0.20*inch))
               n1 = 'PICC is a Phat Panda partner brand of premium infused prerolls. This proposal recommends <b>10 SKUs</b> spanning our top-performing statewide lineup at <b>'+str(ups)+' units per SKU</b>, sized to your existing category volume.'
               story.append(Paragraph(n1, ss['Meta'])); story.append(Spacer(1, 0.10*inch))
-              story.append(Paragraph('Terms: Net-30, freight included, MOQ waived on initial PICC placement.', ss['Note']))
+              story.append(Paragraph('Terms: Net-30, freight included, MOQ waived on initial PICC placement. Includes an automatic 10% launch discount.', ss['Note'])); is_vmi = 'VMI' in store['name']; vmi_extra = round(net*0.20,2); vmi_final = round(net-vmi_extra,2); vmi_line = ('* VMI customer bonus applied: -\$'+format(vmi_extra,',.2f')+' (20% off) — Final total <b>\$'+format(vmi_final,',.2f')+'</b>') if is_vmi else '* VMI customers receive an additional 20% off — ask your rep for the VMI code.'; story.append(Paragraph(vmi_line, ss['Note']))
               story.append(Spacer(1, 0.35*inch))
               story.append(Paragraph('Approved by ______________________________________  Date __________________', ss['Meta']))
               doc.build(story)
@@ -169,7 +169,7 @@ jobs:
               w = csv.writer(mf); w.writerow(['Store','Panda YTD Spend','Panda Units','Units/SKU','Proposal Total','PDF Filename'])
               for s in ranked:
                   fn = san(s['name']) + ' PICC Proposal.pdf'
-                  total = build(s, os.path.join('data/proposals', fn))
+                  total = round(build(s, os.path.join('data/proposals', fn)) * 0.90, 2)
                   w.writerow([s['name'], round(s['spend'],2), s['units'], s['ups'], round(total,2), fn])
           print('done. wrote', len(ranked), 'PDFs')
           PYEOF
