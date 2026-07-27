@@ -34,12 +34,40 @@
     return _num.format(Math.round(v));
   };
 
-  // ---------- Date helpers ----------
+  // ---------- Date helpers (Pacific time) ----------
+  // All period boundaries are computed in America/Los_Angeles so a "week"
+  // ends at midnight PT, not midnight UTC.
+  const PT_TZ = 'America/Los_Angeles';
+  const _dowNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+
+  function _ptYmd(date) {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: PT_TZ, year: 'numeric', month: '2-digit', day: '2-digit'
+    }).format(date);
+  }
+  function _ptDow(date) {
+    return _dowNames.indexOf(new Intl.DateTimeFormat('en-US', {
+      timeZone: PT_TZ, weekday: 'short'
+    }).format(date));
+  }
+  function _ptDateFromYmd(y, m, d) {
+    let guess = new Date(Date.UTC(y, m - 1, d, 19, 0, 0));
+    const parts = _ptYmd(guess).split('-').map(Number);
+    if (parts[0] !== y || parts[1] !== m || parts[2] !== d) {
+      const diff = (Date.UTC(y, m - 1, d) - Date.UTC(parts[0], parts[1] - 1, parts[2])) / 86400000;
+      guess = new Date(guess.getTime() + diff * 86400000);
+    }
+    return guess;
+  }
   function toDate(s) {
     if (s instanceof Date) return s;
     if (!s) return null;
     if (typeof s === 'string') {
-      const d = new Date(s.length === 10 ? s + 'T00:00:00Z' : s.replace(' ', 'T'));
+      if (s.length === 10 && /^\d{4}-\d{2}-\d{2}$/.test(s)) {
+        const [y, m, d] = s.split('-').map(Number);
+        return _ptDateFromYmd(y, m, d);
+      }
+      const d = new Date(s.replace(' ', 'T'));
       return isNaN(d) ? null : d;
     }
     return null;
@@ -48,29 +76,44 @@
     if (!d) return '';
     const dt = (d instanceof Date) ? d : toDate(d);
     if (!dt || isNaN(dt)) return '';
-    return dt.toISOString().slice(0, 10);
+    return _ptYmd(dt);
   }
   function addDays(d, n) { const x = new Date(d); x.setUTCDate(x.getUTCDate() + n); return x; }
   function startOfWeek(d) {
     const x = toDate(d) || new Date();
-    const dow = x.getUTCDay();
+    const dow = _ptDow(x);
     const offsetToMon = (dow === 0) ? -6 : (1 - dow);
-    const wk = new Date(Date.UTC(x.getUTCFullYear(), x.getUTCMonth(), x.getUTCDate()));
-    wk.setUTCDate(wk.getUTCDate() + offsetToMon);
-    return wk;
+    const [y, m, day] = _ptYmd(x).split('-').map(Number);
+    const wk = _ptDateFromYmd(y, m, day);
+    return addDays(wk, offsetToMon);
   }
   function endOfWeek(d) { return addDays(startOfWeek(d), 6); }
-  function startOfMonth(d) { const x = toDate(d) || new Date(); return new Date(Date.UTC(x.getUTCFullYear(), x.getUTCMonth(), 1)); }
-  function endOfMonth(d) { const x = toDate(d) || new Date(); return new Date(Date.UTC(x.getUTCFullYear(), x.getUTCMonth() + 1, 0)); }
+  function startOfMonth(d) {
+    const x = toDate(d) || new Date();
+    const [y, m] = _ptYmd(x).split('-').map(Number);
+    return _ptDateFromYmd(y, m, 1);
+  }
+  function endOfMonth(d) {
+    const x = toDate(d) || new Date();
+    const [y, m] = _ptYmd(x).split('-').map(Number);
+    const nextY = m === 12 ? y + 1 : y;
+    const nextM = m === 12 ? 1 : m + 1;
+    return addDays(_ptDateFromYmd(nextY, nextM, 1), -1);
+  }
   function startOfQuarter(d) {
     const x = toDate(d) || new Date();
-    const qStart = Math.floor(x.getUTCMonth() / 3) * 3;
-    return new Date(Date.UTC(x.getUTCFullYear(), qStart, 1));
+    const [y, m] = _ptYmd(x).split('-').map(Number);
+    const qStart = Math.floor((m - 1) / 3) * 3 + 1;
+    return _ptDateFromYmd(y, qStart, 1);
   }
   function endOfQuarter(d) {
     const x = toDate(d) || new Date();
-    const qStart = Math.floor(x.getUTCMonth() / 3) * 3;
-    return new Date(Date.UTC(x.getUTCFullYear(), qStart + 3, 0));
+    const [y, m] = _ptYmd(x).split('-').map(Number);
+    const qStart = Math.floor((m - 1) / 3) * 3 + 1;
+    const nextQStartMonth = qStart + 3;
+    const nextY = nextQStartMonth > 12 ? y + 1 : y;
+    const nextM = nextQStartMonth > 12 ? nextQStartMonth - 12 : nextQStartMonth;
+    return addDays(_ptDateFromYmd(nextY, nextM, 1), -1);
   }
   function withinRange(dateStr, from, to) {
     const d = ymd(dateStr);
@@ -81,7 +124,7 @@
   }
   function weekLabel(d) {
     const s = startOfWeek(d);
-    return 'Wk of ' + s.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+    return 'Wk of ' + s.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: PT_TZ });
   }
   function relTime(iso) {
     if (!iso) return '';
